@@ -75,6 +75,12 @@ s/OID \d+/OID NNNN/
 m/ \((bmfuncs|nodeModifyTable)\.c:(\d+|XXX)\)$/
 s/ \((bmfuncs|nodeModifyTable)\.c:(\d+|XXX)\)$//
 
+# Where Cloudberry's error at a debug_dtm_action comes from, which its
+# test's own matchsubs leave as "(SOMEFILE:SOMEFUNC)" and the port's error
+# does not say (udf_exception_blocks_panic_scenarios).
+m/^ERROR:  PANIC for debug_dtm_action = .*\((\w+\.c:\d+|SOMEFILE:SOMEFUNC)\)/
+s/\s+\((\w+\.c:\d+|SOMEFILE:SOMEFUNC)\)//
+
 # A fault's PANIC: whether its message reaches the client before the
 # connection closes is a race -- the client's next query may find the
 # connection closed first, and libpq then says that alone -- as Cloudberry's

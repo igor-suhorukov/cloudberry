@@ -267,6 +267,36 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- The segments that hold a table's rows, and each of them restarted:
+-- immediately, which has it recover, or fast, which does not.
+CREATE FUNCTION primary_segments_containing_data_for(table_name text) RETURNS SETOF integer AS $$
+BEGIN
+	RETURN QUERY EXECUTE 'select distinct gp_segment_id from ' || table_name;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE FUNCTION restart_primary_segments_containing_data_for(table_name text) RETURNS SETOF integer AS $$
+DECLARE
+	segment_id integer;
+BEGIN
+	FOR segment_id IN SELECT * FROM primary_segments_containing_data_for(table_name)
+	LOOP
+		PERFORM pg_ctl((SELECT get_data_directory_for(segment_id)), 'restart', 'immediate');
+	END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE FUNCTION clean_restart_primary_segments_containing_data_for(table_name text) RETURNS SETOF integer AS $$
+DECLARE
+	segment_id integer;
+BEGIN
+	FOR segment_id IN SELECT * FROM primary_segments_containing_data_for(table_name)
+	LOOP
+		PERFORM pg_ctl((SELECT get_data_directory_for(segment_id)), 'restart', 'fast');
+	END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
 CREATE FUNCTION master() RETURNS SETOF gp_segment_configuration AS $$
 	SELECT * FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
 $$ LANGUAGE sql;

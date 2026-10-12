@@ -1,0 +1,25 @@
+@@
+-ERROR:  DTX RollbackAndReleaseCurrentSubTransaction dispatch failed
+-CONTEXT:  PL/pgSQL function test_protocol_allseg(integer,integer,character) line 19 during exception cleanup
++DETAIL:  A connection to a segment closed while the transaction was open.
++ERROR:  lost the segments' part of this transaction
+@@
+-ERROR:  DTX RollbackAndReleaseCurrentSubTransaction dispatch failed
+-CONTEXT:  PL/pgSQL function test_protocol_allseg(integer,integer,character) line 19 during exception cleanup
++DETAIL:  A connection to a segment closed while the transaction was open.
++ERROR:  lost the segments' part of this transaction
+@@
+-ERROR:  DTX RollbackAndReleaseCurrentSubTransaction dispatch failed
+-CONTEXT:  PL/pgSQL function test_protocol_allseg(integer,integer,character) line 18 during exception cleanup
++DETAIL:  A connection to a segment closed while the transaction was open.
++ERROR:  lost the segments' part of this transaction
+@@
+-ERROR:  DTX RollbackAndReleaseCurrentSubTransaction dispatch failed
+-CONTEXT:  PL/pgSQL function test_protocol_allseg(integer,integer,character) line 18 during exception cleanup
++DETAIL:  A connection to a segment closed while the transaction was open.
++ERROR:  lost the segments' part of this transaction
+@@
+-ERROR:  DTX RollbackAndReleaseCurrentSubTransaction dispatch failed
+-CONTEXT:  PL/pgSQL function test_protocol_allseg(integer,integer,character) line 18 during exception cleanup
++DETAIL:  A connection to a segment closed while the transaction was open.
++ERROR:  lost the segments' part of this transaction

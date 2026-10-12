@@ -15,20 +15,27 @@ KIND, either express or implied.  See the License for the
 specific language governing permissions and limitations
 under the License.
 
-Injection points for the port's tests, under the names of three of Apache
-Cloudberry's faults inside PostgreSQL's own abort and checkpoint, which
-distributed_transactions and pg_rewind_fail_missing_xlog in its isolation2
-schedule set: an error in an abort once the transaction has ended for the
-other backends, which has AbortTransaction() run again -- the core series'
+Injection points for the port's tests, under the names of four of Apache
+Cloudberry's faults inside PostgreSQL's own abort, checkpoint and DROP
+DATABASE, which distributed_transactions and pg_rewind_fail_missing_xlog in
+its isolation2 schedule set, and dropdb_crash_hazards in its crash schedule:
+an error in an abort once the transaction has ended for the other backends,
+which has AbortTransaction() run again -- the core series'
 XactAbortAgainAfterEnd (O37) keeps the second run from recording the abort
 again; a checkpoint held with its redo point reckoned and its buffers
 written, its record not yet, so that a node stopped there never completes
-it; and a checkpoint held once its record is written and the control file
-updated, before the WAL it no longer needs is removed:
+it -- where crash_recovery_redundant_dtx holds one too, under the name of
+Cloudberry's fault at the checkpoint's list of distributed transactions,
+which the port's checkpoint has none of (gp_fault.c); a checkpoint held once
+its record is written and the control file updated, before the WAL it no
+longer needs is removed; and a DROP DATABASE with the database marked
+invalid and its row deleted, the deletion not committed, where
+Cloudberry's fault is, before its segments are told and its files go:
 
   abort_after_procarray_end          xact.c, AbortTransaction()
   checkpoint_after_redo_calculated   xlog.c, CreateCheckPoint()
   checkpoint_control_file_updated    xlog.c, CreateCheckPoint()
+  after_dbdrop_tuple_update_tuple    dbcommands.c, dropdb()
 
 gp_core's fault injector attaches a fault of Cloudberry's name to the point
 (gp_fault.c).  They serve tests alone, so they are not in the core series:
@@ -81,3 +88,18 @@ empty, and with them a point nothing attached to runs no callback.
  	/*
  	 * WAL summaries end when the next XLOG_CHECKPOINT_REDO or
  	 * XLOG_CHECKPOINT_SHUTDOWN record is reached. This is the first point
+--- a/src/backend/commands/dbcommands.c
++++ b/src/backend/commands/dbcommands.c
+@@ -1859,6 +1859,12 @@
+ 	heap_freetuple(tup);
+ 
+ 	/*
++	 * A test may fail the server here, the database marked invalid and its
++	 * row's deletion not committed.
++	 */
++	INJECTION_POINT("after_dbdrop_tuple_update_tuple", NULL);
++
++	/*
+ 	 * Drop db-specific replication slots.
+ 	 */
+ 	ReplicationSlotsDropDBSlots(db_id);

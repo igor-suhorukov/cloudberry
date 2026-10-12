@@ -26,7 +26,10 @@
 # and waited for; and the rest, a session of a node's own, the dispatcher's
 # gangs, indexes, VACUUM and ANALYZE, and the bitmap index.  And
 # parallel_retrieve_cursor_schedule, M8's: parallel retrieve cursors and the
-# retrieve sessions that read them (1R:, *R:).
+# retrieve sessions that read them (1R:, *R:).  And
+# isolation2_crash_schedule: a segment or the coordinator failed inside a
+# VACUUM, a distributed transaction's commit, a subtransaction or DROP
+# DATABASE, and what its recovery leaves.
 #
 # src/test/isolation2 is Cloudberry's suite of tests that need more than one
 # session at a time, written in its isolation2 syntax (1: ..., 2&: ..., 2<:,
@@ -486,6 +489,14 @@ done
 	# returns one, in the helper and in the expected output, which echoes it
 	# on one line.
 	echo "sed s/(get_tablespace_path = postgres\\['get_tablespace_path'\\])/\\1; get_tablespace_path.restype = ctypes.c_void_p/"
+	# A PL/Python block that leaves its backend in /tmp, so that what it
+	# writes is not in the coordinator's data directory (packcore's, which
+	# writes nothing where no core file is): PostgreSQL finds a relation's
+	# file by a path from its own directory, and a file that backend opens
+	# after is not found -- pg_class's as the block ended, on a coordinator
+	# that had just restarted, "could not open file".  The backend stays
+	# where it is.
+	echo "sed s/os\\.chdir\\('\\/tmp'\\)/pass/"
 	[ -n "$EXTRA_SED" ] && sed 's/^/sed /' "$EXTRA_SED"
 } > "$WORK/respell"
 respell() { perl "$HERE/../respell.pl" "$WORK/respell" "$@"; }
@@ -600,6 +611,18 @@ run_group() {
 		done
 		sed "${e[@]}"
 	}
+	# A node of Cloudberry's demo cluster named by its port, where a test's
+	# shell command waits for one to answer again after its PANIC
+	# (pg_isready -p 7002, content 0's primary; -p 7000, the coordinator):
+	# the group's node of that place.
+	own_ports() {
+		local c ports="7000=$(node_port "$gi" 0) 7001=$(standby_port "$gi")"
+		for c in 0 1 2; do
+			ports="$ports $((7002 + c))=$(node_port "$gi" $((c + 1))) $((7005 + c))=$(mirror_port "$gi" "$c")"
+		done
+		PORTS="$ports" perl -pe 'BEGIN { %p = map { split /=/ } split / /, $ENV{PORTS} }
+			s/(pg_isready\b[^;&|]*?\s-p\s+)(\d+)\b/$1 . ($p{$2} \/\/ $2)/ge'
+	}
 	: > "$R/status"
 	"$PSQL" -X -q -d postgres -c "DROP DATABASE IF EXISTS $DBNAME" > /dev/null 2>&1
 	"$PSQL" -X -q -d postgres -c "CREATE DATABASE $DBNAME TEMPLATE template0" > /dev/null
@@ -647,9 +670,9 @@ run_group() {
 			fi
 		done
 		if [ -f "$src/input/$tmpl.source" ]; then
-			convert "$src/input/$tmpl.source" | amsub | respell | own_tmp | own_host | own_nodes > "$R/sql/$t.sql"
+			convert "$src/input/$tmpl.source" | amsub | respell | own_tmp | own_host | own_nodes | own_ports > "$R/sql/$t.sql"
 		else
-			respell "$src/sql/$t.sql" | own_tmp | own_host | own_nodes > "$R/sql/$t.sql"
+			respell "$src/sql/$t.sql" | own_tmp | own_host | own_nodes | own_ports > "$R/sql/$t.sql"
 		fi
 		# What it is compared with, and the name a difference kept is filed
 		# under: the expected output's, which for such a test of two is its
@@ -667,7 +690,7 @@ run_group() {
 				name="${name}_optimizer"
 			fi
 		fi
-		convert "$exp" | amsub | respell | own_tmp | own_host | own_nodes > "$R/expected/$t.out"
+		convert "$exp" | amsub | respell | own_tmp | own_host | own_nodes | own_ports > "$R/expected/$t.out"
 
 		# As pg_isolation2_regress runs it, from the suite's directory; how
 		# long it ran is reported with its result, as pg_regress reports it.

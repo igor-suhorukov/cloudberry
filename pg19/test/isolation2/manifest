@@ -71,7 +71,8 @@
 # mirrors3, segwalrep/master_wal_switch in standby, the bitmap index's
 # crash recovery in mirrors7, and pg_rewind_fail_missing_xlog in mirrors8,
 # which sets wal_keep_size and wal_recycle, restarts the cluster, and fails
-# two contents over and recovers them twice each.
+# two contents over and recovers them twice each.  And Cloudberry's
+# isolation2_crash_schedule, at the end of this file, in mirrors9.
 skip gpdispatch                             gp_cte_sharing, Cloudberry's planner's sharing of a CTE (the test turns ORCA off): its ShareInputScan on segment 0, whose writer the fault shareinput_writer_notifyready holds, the port's planner route has not (Route B); it waits for the fault
 run  check_gxid                                         crash
 run  checkpoint_dtx_info                                crash
@@ -375,8 +376,34 @@ run  parallel_retrieve_cursor/security             retrieve
 skip parallel_retrieve_cursor/privilege            CREATE USER by a user with CREATEROLE: "segment used 1 of the 2 OIDs the coordinator allocated for this statement", the segments running it as the gang's login user, which grants the new role to nobody
 run  parallel_retrieve_cursor/unset                retrieve
 #
-# And one of Cloudberry's isolation2_crash_schedule, whose other tests are
-# not listed: segments restarted between the two phases, which the
-# coordinator's recovery process ends (port/dirxact_restart does so for
-# CREATE DATABASE and DROP TABLESPACE).
+# And Cloudberry's isolation2_crash_schedule, whose tests PANIC a node, in a
+# group of its own, mirrors9, and in that schedule's order: its cluster has
+# the mirrors and the standby coordinator the tests print the rows of, and
+# the coordinator there fails six times.  A VACUUM's compaction with a
+# segment failed inside it and then the coordinator; the coordinator failed
+# between a distributed transaction's two phases, which its recovery
+# process ends -- beside them port/gxid_ahead, the port's own: the
+# transaction ID the parts are prepared under is given to nobody again; an
+# unlogged table's rows across a segment's restarts; a segment failed as a
+# subtransaction begins, is released or rolled back; a table made and
+# truncated in a transaction that aborts, replayed; a coordinator failed
+# inside DROP DATABASE; and packcore.  A node the tests name by its port in
+# Cloudberry's demo cluster -- pg_isready -p 7002, content 0's primary -- is
+# the group's (run.sh).  crash_recovery_dtm is of segments restarted
+# between the two phases, which the coordinator's recovery process ends
+# (port/dirxact_restart does so for CREATE DATABASE and DROP TABLESPACE).
+run  uao_crash_compaction_column                        mirrors9
+run  uao_crash_compaction_row                           mirrors9
+run  crash_recovery                                     mirrors9
+run  crash_recovery_redundant_dtx                       mirrors9
+run  port/gxid_ahead                                    mirrors9
 skip crash_recovery_dtm  unrecognized configuration parameter "dtx_phase2_retry_second", the seconds Cloudberry's coordinator retries a failed second phase before it PANICs, its recovery then ending the parts, which the test waits for (wait_till_master_shutsdown()): the port's coordinator retries over a new connection and leaves a part it did not reach to the recovery process, and does not PANIC
+run  unlogged_heap_tables                               mirrors9
+run  unlogged_appendonly_tables                         mirrors9
+run  udf_exception_blocks_panic_scenarios               mirrors9
+run  ao_same_trans_truncate_crash                       mirrors9
+skip frozen_insert_crash                    the faults insert_fastsequence_before_freeze and insert_fastsequence_after_freeze, insert_aoseg_before_freeze and insert_bmlov_before_freeze, each beside a record with which Cloudberry freezes a row it has just inserted: gp_fastsequence's, a table gp_ao has not; a segment file's, which in gp_ao.segfile is its writer's until it commits; and the row of a bitmap index's list of values, which gp_ao inserts frozen, with no record after; it waits for the first.  Its last case, the list of values once the row is frozen, runs as port/frozen_insert_crash
+run  port/frozen_insert_crash                           mirrors9
+run  dropdb_crash_hazards                               mirrors9
+skip prevent_ao_wal                         that an append-optimized table writes no WAL at wal_level = minimal, where Cloudberry, which writes and syncs such a table's files itself, logs them for its mirrors alone: gp_ao's pages are the buffer manager's and a crash is recovered from their records, so they are written there as a heap's are (the ao suite, section 19); and pg_waldump knows gp_ao's records by their resource manager's ID, where the test asks for "appendonly"
+run  packcore                                           mirrors9

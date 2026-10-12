@@ -550,3 +550,44 @@ parallel_retrieve_cursor/status_check, parallel_retrieve_cursor/status_wait
   restarts after its endpoint's sender was killed with SIGQUIT (Test4) fails
   the coordinator's statements in PostgreSQL's words for a connection that
   closed, where Cloudberry's add "Error on receive from" the segment.
+
+
+Cloudberry's isolation2_crash_schedule, in the group mirrors9:
+
+uao_crash_compaction_row, uao_crash_compaction_column
+  A VACUUM is each segment's own here, a statement the coordinator sends
+  once, where Cloudberry's coordinator sends its segments the compaction
+  and then the phase that drops what they compacted, each in a distributed
+  transaction.  Three things follow, in what the tests print of the
+  segment files after each failure; the rows the tables hold after, and
+  every file's rows once the next VACUUM has run, are Cloudberry's.
+  Segment 0 failed as its compaction inserts the first row it moves
+  (crash_vacuum_in_appendonly_insert): Cloudberry's compaction fails on
+  every segment with it, so file 1 keeps its rows everywhere and file 2
+  has none; here segments 1 and 2 have compacted, their file 1 empty and
+  five rows in file 2, and segment 0 has not.  The coordinator failed at
+  compaction_before_cleanup_phase (crash_master_before_cleanup_phase):
+  Cloudberry's fails with the compaction done and the files it emptied
+  awaiting drop (state 2) until the next VACUUM; here the fault is at the
+  VACUUM's end on the coordinator, its segments done (gp_ao.c), and they
+  have recycled those files, in state 1 and empty -- so the INSERT after
+  takes the recycled file where Cloudberry's takes the other, as in
+  mark_all_aoseg_await_drop above.  And a new segment file's row, written
+  by a VACUUM that segment 0's restart ends before it logs the file's
+  first block (crash_vacuum_in_appendonly_insert_1, the column table's
+  test): Cloudberry's is there, frozen, and here it went with its writer,
+  as in uao/insert_policy above.  A segment that failed between its own
+  compaction and its drop of the file (crash_before_cleanup_phase) leaves
+  the file awaiting drop, as Cloudberry's does.  Besides, the row table's
+  test prints a file's bytes, eof: gp_ao's block of the same rows is
+  longer than Cloudberry's, here by 16 or 24 bytes.
+
+udf_exception_blocks_panic_scenarios
+  The words of the error where a segment fails as a subtransaction is
+  released or rolled back: "lost the segments' part of this transaction",
+  with the detail that a connection to a segment closed while the
+  transaction was open, where Cloudberry's says "DTX
+  RollbackAndReleaseCurrentSubTransaction dispatch failed" with the
+  function's line as its context.  In each case the statement fails, the
+  segment recovers and the table the function made is not there, as in
+  Cloudberry's.

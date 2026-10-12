@@ -982,7 +982,9 @@ tools, a node recovered elsewhere and the standby promoted and made again
 indexes, VACUUM and ANALYZE, the bitmap index, and Cloudberry's faults in
 PostgreSQL's own code as the tests' build's injection points -- and its
 `parallel_retrieve_cursor_schedule`, M8's parallel retrieve
-cursors and their retrieve sessions, run by Cloudberry's own driver on the
+cursors and their retrieve sessions, and its `isolation2_crash_schedule`,
+a segment or the coordinator failed inside a VACUUM, a commit, a
+subtransaction or DROP DATABASE, run by Cloudberry's own driver on the
 same cluster, with a standby
 coordinator for the tests that ask for one, and mirrors for the FTS tests; `fts`, M4's, a coordinator and three primaries
 each with a mirror, and what FTS does when a mirror or a primary stops;
