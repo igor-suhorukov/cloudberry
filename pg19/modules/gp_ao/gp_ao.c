@@ -926,6 +926,34 @@ recycle_compacted(void)
 }
 
 /*
+ * Cloudberry's fault between a VACUUM's compaction and the phase that drops
+ * what it compacted, on the coordinator, which there sends its segments the
+ * one and then the other: a test fails the coordinator at it, the segments
+ * having compacted (uao_crash_compaction_row).  A segment here does both as
+ * its own VACUUM ends, where it has the fault too (ao_vacuum_recycle_rel());
+ * the coordinator's is once its segments have answered the VACUUM, for each
+ * table the statement names.
+ */
+static void
+coordinator_before_cleanup_fault(VacuumStmt *stmt)
+{
+	const GpCoreApi *core;
+
+	if (gp_fault_active == NULL || *gp_fault_active == 0 || !stmt->is_vacuumcmd)
+		return;
+	core = GpCoreApiLookup();
+	if (core == NULL || core->get_role() != GP_ROLE_DISPATCH ||
+		core->is_single_node())
+		return;
+	foreach_node(VacuumRelation, vrel, stmt->rels)
+	{
+		if (vrel->relation != NULL)
+			(void) GpFaultTrigger("compaction_before_cleanup_phase", "",
+								  vrel->relation->relname);
+	}
+}
+
+/*
  * An append-optimized table keeps no transaction IDs in its rows, so it has
  * no relfrozenxid or relminmxid -- Cloudberry's are 0 -- and PostgreSQL
  * leaves such a table out as it advances datfrozenxid.  A rewrite that swaps
@@ -1278,7 +1306,10 @@ gp_ao_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 									  NoLock, true), alter);
 
 	if (IsA(parsetree, VacuumStmt))
+	{
+		coordinator_before_cleanup_fault((VacuumStmt *) parsetree);
 		recycle_compacted();
+	}
 	reset_frozen_xids();
 	ao_fetch_cache_reset();
 }

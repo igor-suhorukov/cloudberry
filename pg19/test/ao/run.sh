@@ -54,6 +54,7 @@ cleanup() {
 	"$BINDIR/pg_ctl" -D "$WORK/data" -m immediate stop > /dev/null 2>&1
 	"$BINDIR/pg_ctl" -D "$WORK/standby" -m immediate stop > /dev/null 2>&1
 	"$BINDIR/pg_ctl" -D "$WORK/standby2" -m immediate stop > /dev/null 2>&1
+	"$BINDIR/pg_ctl" -D "$WORK/minimal" -m immediate stop > /dev/null 2>&1
 	[ -n "${KEEP:-}" ] && echo "kept: $WORK" || rm -rf "$WORK"
 	rm -rf "$SOCK"
 }
@@ -1024,6 +1025,56 @@ isl "which the index finds" "SET enable_seqscan = off; SELECT b FROM ulr WHERE a
 q "ALTER TABLE ulr SET LOGGED;" > /dev/null
 is "ALTER TABLE ... SET LOGGED gives it a storage ID of logged files, with its rows" \
    "SELECT gp_ao.storage_id('ulr') > 0 AND (SELECT count(*) FROM ulr) = 300;" "t"
+
+###############################################################################
+echo "19. wal_level = minimal: gp_ao's records are what a crash is recovered from"
+###############################################################################
+# Cloudberry writes no append-only record at wal_level = minimal: it writes
+# and syncs an append-optimized table's files itself, and their records are
+# for its mirrors alone (isolation2's prevent_ao_wal, which the port skips).
+# gp_ao's pages are the buffer manager's, and a crash is recovered from their
+# records, so they are written wherever PostgreSQL would log a heap's: not
+# for a table made in the transaction that fills it, whose pages PostgreSQL
+# logs or syncs whole as it commits.
+MN="$WORK/minimal"
+MNPORT=$((PORT + 3))
+qm() { "$PSQL" -X -q -t -A -p "$MNPORT" -d postgres -c "$1" 2>&1; }
+ao_records() { "$BINDIR/pg_waldump" -p "$MN/pg_wal" -s "$1" -r custom200 2> /dev/null | wc -l; }
+"$BINDIR/initdb" -D "$MN" -N --locale=C --encoding=UTF8 > "$WORK/initdb-minimal.log" 2>&1
+{
+	echo "unix_socket_directories = '$SOCK'"
+	echo "listen_addresses = ''"
+	echo "port = $MNPORT"
+	echo "shared_preload_libraries = 'gp_core,gp_sql,gp_ao'"
+	echo "wal_level = minimal"
+	echo "max_wal_senders = 0"
+} >> "$MN/postgresql.conf"
+"$BINDIR/pg_ctl" -D "$MN" -l "$WORK/log-minimal" -w -t 60 start > /dev/null 2>&1
+qm "CREATE EXTENSION gp_ao CASCADE;" > /dev/null
+qm "CREATE TABLE mn_row (n int) WITH (appendonly=true);" > /dev/null
+qm "CREATE TABLE mn_col (n int, m int) WITH (appendonly=true, orientation=column);" > /dev/null
+qm "CHECKPOINT;" > /dev/null
+at=$(qm "SELECT pg_current_wal_insert_lsn();")
+qm "INSERT INTO mn_row SELECT generate_series(1, 1000);" > /dev/null
+qm "INSERT INTO mn_col SELECT i, i FROM generate_series(1, 1000) i;" > /dev/null
+n=$(ao_records "$at")
+[ "$(qm "SHOW wal_level;")" = minimal ] && [ "$n" -gt 0 ] \
+	&& ok "an INSERT into a table made before writes gp_ao's records there too" \
+	|| notok "an INSERT at wal_level = minimal" "wal_level $(qm "SHOW wal_level;"), $n records"
+at=$(qm "SELECT pg_current_wal_insert_lsn();")
+qm "BEGIN;
+	CREATE TABLE mn_new (n int) WITH (appendonly=true);
+	INSERT INTO mn_new SELECT generate_series(1, 1000);
+	COMMIT;" > /dev/null
+n=$(ao_records "$at")
+[ "$n" -eq 0 ] && ok "a table made and filled in one transaction writes none" \
+	|| notok "a table made and filled in one transaction" "$n records"
+"$BINDIR/pg_ctl" -D "$MN" -m immediate -w stop > /dev/null 2>&1
+"$BINDIR/pg_ctl" -D "$MN" -l "$WORK/log-minimal" -w -t 60 start > /dev/null 2>&1
+out=$(qm "SELECT count(*) || ' ' || (SELECT count(*) FROM mn_col) || ' ' || (SELECT count(*) FROM mn_new) FROM mn_row;")
+[ "$out" = "1000 1000 1000" ] && ok "after a crash each has its rows" \
+	|| notok "after a crash at wal_level = minimal" "want [1000 1000 1000], got [$out]"
+"$BINDIR/pg_ctl" -D "$MN" -m fast -w stop > /dev/null 2>&1
 
 echo
 echo "  $pass passed, $fail failed"
