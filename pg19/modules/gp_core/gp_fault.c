@@ -139,6 +139,17 @@ static const char *const fault_type_names[] = {
  * commit record the distributed one's decision (gp_dtx.c); and the
  * checkpoint's reckoning of what its replication slots keep, which a "skip"
  * has keep nothing, as Cloudberry's does.
+ *
+ * And one of Cloudberry's faults at a moment the port has not, which a test
+ * holds a checkpoint at for another that it has: a checkpoint's list of the
+ * distributed transactions committed and not yet forgotten, made once its
+ * redo point is reckoned (getDtxCheckPointInfo(), procarray.c) -- the
+ * port's checkpoint lists none, the coordinator's clog being the record
+ * (gp_dtx.c) -- at which crash_recovery_redundant_dtx holds one while a
+ * transaction writes its commit record, after the redo point and before
+ * the checkpoint's own.  It is the tests' build's point of a checkpoint
+ * whose redo point is reckoned and whose record is not yet written
+ * (test-iso2-recovery.patch).
  */
 typedef enum GpPointArg
 {
@@ -175,6 +186,7 @@ static const struct
 	{"start_insertedDistributedCommitted", "start_insertedDistributedCommitted", POINT_ARG_PREPARED},
 	{"keep_log_seg", "keep_log_seg", POINT_ARG_SKIP},
 	{"heap_insert", "heap_insert", POINT_ARG_NAMES},
+	{"checkpoint_dtx_info", "checkpoint_after_redo_calculated", POINT_ARG_NONE},
 };
 
 /* The injection point a fault is attached to: its own name, or PostgreSQL's. */

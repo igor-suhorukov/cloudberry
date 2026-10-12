@@ -1815,6 +1815,29 @@ hold_notices_fail(MemoryContext cxt)
 	ReThrowError(edata);
 }
 
+/*
+ * Does this VACUUM end with the update of the database's row
+ * (vac_update_datfrozenxid())?  As ExecVacuum() reads its options: the last
+ * word on each counts.
+ */
+static bool
+vacuum_updates_database(VacuumStmt *stmt)
+{
+	bool		skip = false;
+	bool		only = false;
+
+	if (!stmt->is_vacuumcmd)
+		return false;
+	foreach_node(DefElem, opt, stmt->options)
+	{
+		if (strcmp(opt->defname, "skip_database_stats") == 0)
+			skip = defGetBoolean(opt);
+		else if (strcmp(opt->defname, "only_database_stats") == 0)
+			only = defGetBoolean(opt);
+	}
+	return !skip && !only;
+}
+
 static void
 gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 					  bool readOnlyTree, ProcessUtilityContext context,
@@ -1826,6 +1849,8 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	char	   *tree;
 	List	   *kept;
 	bool		builds;
+	bool		database_stats;
+	PlannedStmt *here = pstmt;
 	MemoryContext cxt = CurrentMemoryContext;
 
 	/*
@@ -1945,6 +1970,30 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	/* Before running it: PostgreSQL may change a tree it is given. */
 	tree = nodeToString(parsetree);
 
+	/*
+	 * A VACUUM ends with the update of its database's row, under a lock on
+	 * the database's frozen IDs that lasts to the end of the transaction
+	 * (vac_update_datfrozenxid()) -- PostgreSQL's last, in which the
+	 * segments are then told to VACUUM.  Every other VACUUM of the database
+	 * would wait there, its own segments not yet told, until this one's
+	 * were done, and so would the autovacuum workers.  So the VACUUM run
+	 * here leaves the update out (SKIP_DATABASE_STATS), and it is made once
+	 * the segments have answered; a segment's VACUUM makes its own as it
+	 * ends, as the statement says.
+	 */
+	database_stats = IsA(parsetree, VacuumStmt) &&
+		vacuum_updates_database((VacuumStmt *) parsetree);
+	if (database_stats)
+	{
+		VacuumStmt *stmt;
+
+		here = copyObject(pstmt);
+		stmt = castNode(VacuumStmt, here->utilityStmt);
+		stmt->options = lappend(stmt->options,
+								makeDefElem("skip_database_stats",
+											(Node *) makeBoolean(true), -1));
+	}
+
 	/* an index build's tables' counts, which the coordinator's would empty */
 	kept = GpAnalyzeKeepCounts(parsetree);
 
@@ -1963,7 +2012,8 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		hold_notices_begin();
 	PG_TRY();
 	{
-		run_tablespace_statement(pstmt, queryString, readOnlyTree, context,
+		run_tablespace_statement(here, queryString,
+								 here == pstmt && readOnlyTree, context,
 								 params, queryEnv, dest, qc, false);
 	}
 	PG_CATCH();
@@ -2007,6 +2057,8 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	if (IsA(parsetree, VacuumStmt))
 		GpDispatchHorizon();
 	GpDispatchUtility(build_payload(tree), class == GP_DISPATCH_OWN_XACT, builds);
+	if (database_stats)
+		vac_update_datfrozenxid();
 	check_extension_everywhere(parsetree);
 	if (IsA(parsetree, CreatedbStmt))
 		create_core_extension(((CreatedbStmt *) parsetree)->dbname);
