@@ -486,7 +486,7 @@ loopback_pre_commit(void)
 
 	two_phase = loopback_two_phase();
 	if (two_phase)
-		gxid = GetTopFullTransactionId();
+		gxid = GpDtxGxid();
 
 	foreach_ptr(char, db, dbs)
 	{

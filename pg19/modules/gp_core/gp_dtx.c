@@ -33,6 +33,21 @@
  * a coordinator that went down between the phases, a segment that did not
  * answer the second.
  *
+ * AN ID GIVEN TO NOBODY AGAIN.  PostgreSQL logs no transaction ID as it
+ * gives one: a restart's recovery sets the next past the newest its WAL
+ * names.  A transaction whose parts are prepared, or one committed, under
+ * its ID may have logged nothing under it yet -- an INSERT's writes nothing
+ * on the coordinator before its commit record -- so a coordinator that went
+ * down then would give the ID again, and the recovery process would end the
+ * part left prepared by what became of the new transaction.  So before the
+ * ID goes to a segment the coordinator's WAL says, flushed and on its
+ * synchronous standby, that it gives no ID up to there again
+ * (GpDtxGxid()): a record a batch ahead, as PostgreSQL logs its OIDs
+ * (XLOG_NEXTOID) and Cloudberry its distributed transaction IDs
+ * (XLOG_NEXTGXID), whose redo moves the next ID past it.  An ID so skipped
+ * names a transaction that did not commit, and the part prepared under it
+ * is rolled back.
+ *
  * Which segments wrote, each says with the answer to every statement it is
  * sent: its part's transaction ID, a setting reported to the coordinator
  * (gp.dtx_xid), empty while it has none.  So the coordinator asks nobody as it
@@ -142,6 +157,7 @@
 #include "access/twophase.h"
 #include "access/xact.h"
 #include "access/xlog.h"
+#include "access/xloginsert.h"
 #include "catalog/index.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
@@ -194,6 +210,7 @@
 #include "gp_cluster.h"
 #include "gp_core_api.h"
 #include "gp_dispatch.h"
+#include "gp_dbcopy.h"
 #include "gp_dtx.h"
 #include "gp_settings.h"
 #include "gp_fault.h"
@@ -597,6 +614,14 @@ typedef struct GpDtxShared
 	 * gp_get_next_gxid() on a segment.
 	 */
 	FullTransactionId newest;
+
+	/*
+	 * The coordinator: the newest transaction ID its WAL says it gives to
+	 * nobody again, and the end of the record that says so, one that is
+	 * flushed and on the synchronous standby (GpDtxGxid()).
+	 */
+	uint64		gxid_ahead;
+	XLogRecPtr	gxid_ahead_lsn;
 } GpDtxShared;
 
 static GpDtxShared *dtx_shared = NULL;
@@ -631,6 +656,96 @@ dtx_attach(void)
 									sizeof(GpDtxShared), dtx_init_shared,
 									&found, NULL);
 	dtx_area = GetNamedDSA("gp_core distributed transaction map", &found);
+}
+
+/* ------------------------------------------------------------------------- */
+/* An ID given to nobody again                                               */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * A record of the IDs given to nobody again covers the block of this many
+ * that the ID asked about is in, to its last: PostgreSQL's batch of OIDs
+ * (VAR_OID_PREFETCH), and Cloudberry's default of distributed transaction
+ * IDs (gp_gxid_prefetch_num).  To a block's last and no further, so that the
+ * next ID a recovery ends with is on the page of pg_xact the ID asked about
+ * is on, which was made as PostgreSQL gave the page's first ID, or is the
+ * first of the page after, which is made as that ID is given: a page of
+ * pg_xact holds the status of BLCKSZ * 4 transactions (clog.c), whole blocks.
+ */
+#define GP_DTX_GXID_AHEAD	8192
+
+StaticAssertDecl((BLCKSZ * 4) % GP_DTX_GXID_AHEAD == 0,
+				 "a page of pg_xact must hold whole blocks of GP_DTX_GXID_AHEAD transactions");
+
+/*
+ * GpDtxGxid
+ *		The coordinator's transaction ID, which its parts are about to be
+ *		prepared, or one committed, under: assigned now if it has none, and
+ *		said in the WAL to be given to nobody again (see the top of the
+ *		file).
+ *
+ * A record that is flushed, and on the synchronous standby as a commit's
+ * is, before this returns: a standby promoted must not give the ID again
+ * either.  One record covers a block of IDs, so most calls write nothing.
+ * A record covers an ID only while a recovery would replay it, that is
+ * while it lies after the newest checkpoint's redo point, read here after
+ * the ID was assigned: a checkpoint that begins later reads the next ID
+ * later still, and its own record covers this one.
+ *
+ * A backend that finds no such record writes one of its own and waits for
+ * that, though another's is on its way: PostgreSQL's queue of those who
+ * wait for the standby has each waiting for an LSN of its own
+ * (SyncRepQueueIsOrderedByLSN()).  What the shared memory keeps is one
+ * record's, the newest that covers the most: the last ID it covers and
+ * where it ends.
+ */
+FullTransactionId
+GpDtxGxid(void)
+{
+	FullTransactionId gxid = GetTopFullTransactionId();
+	uint64		want = U64FromFullTransactionId(gxid);
+	XLogRecPtr	redo = GetRedoRecPtr();
+	uint64		ahead;
+	XLogRecPtr	lsn;
+
+	dtx_attach();
+	LWLockAcquire(&dtx_shared->lock, LW_SHARED);
+	ahead = dtx_shared->gxid_ahead;
+	lsn = dtx_shared->gxid_ahead_lsn;
+	LWLockRelease(&dtx_shared->lock);
+	if (want <= ahead && lsn > redo)
+		return gxid;
+
+	ahead = Max(want | (GP_DTX_GXID_AHEAD - 1), ahead);
+	XLogBeginInsert();
+	XLogRegisterData(&ahead, sizeof(ahead));
+	lsn = XLogInsert(GP_CORE_RMGR_ID, XLOG_GP_CORE_GXID);
+	XLogFlush(lsn);
+	HOLD_INTERRUPTS();
+	SyncRepWaitForLSN(lsn, false);
+	RESUME_INTERRUPTS();
+
+	LWLockAcquire(&dtx_shared->lock, LW_EXCLUSIVE);
+	if (ahead > dtx_shared->gxid_ahead ||
+		(ahead == dtx_shared->gxid_ahead && lsn > dtx_shared->gxid_ahead_lsn))
+	{
+		dtx_shared->gxid_ahead = ahead;
+		dtx_shared->gxid_ahead_lsn = lsn;
+	}
+	LWLockRelease(&dtx_shared->lock);
+	return gxid;
+}
+
+/* The redo of its record: the next transaction ID is past the one it names. */
+void
+GpDtxRedoGxid(const char *data, int len)
+{
+	uint64		ahead;
+
+	if (len != sizeof(ahead))
+		elog(PANIC, "gp_core_redo: a record of transaction IDs of %d bytes", len);
+	memcpy(&ahead, data, sizeof(ahead));
+	AdvanceNextFullTransactionIdPastXid((TransactionId) ahead);
 }
 
 static GpDtxEntry *

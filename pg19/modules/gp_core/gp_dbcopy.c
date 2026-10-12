@@ -99,6 +99,7 @@
 #include "gp_cluster.h"
 #include "gp_dbcopy.h"
 #include "gp_dirxact.h"
+#include "gp_dtx.h"
 #include "gp_extmark.h"
 #include "gp_fault.h"
 
@@ -703,6 +704,11 @@ dbcopy_redo(XLogReaderState *record)
 		GpDirxactRedo(info, XLogRecGetData(record), XLogRecGetDataLen(record));
 		return;
 	}
+	if (info == XLOG_GP_CORE_GXID)
+	{
+		GpDtxRedoGxid(XLogRecGetData(record), XLogRecGetDataLen(record));
+		return;
+	}
 	if (info != XLOG_GP_CORE_DBCOPY)
 		elog(PANIC, "gp_core_redo: unknown op code %u", info);
 
@@ -749,6 +755,15 @@ dbcopy_desc(StringInfo buf, XLogReaderState *record)
 		appendStringInfo(buf, "prepared part's file %s", XLogRecGetData(record));
 		return;
 	}
+	if ((XLogRecGetInfo(record) & ~XLR_INFO_MASK) == XLOG_GP_CORE_GXID)
+	{
+		uint64		ahead;
+
+		memcpy(&ahead, XLogRecGetData(record), sizeof(ahead));
+		appendStringInfo(buf, "transaction IDs to " UINT64_FORMAT " given to nobody again",
+						 ahead);
+		return;
+	}
 	memcpy(&rec, XLogRecGetData(record), sizeof(rec));
 	appendStringInfo(buf, "copy dir %u/%u/%s to %u/%u/%s",
 					 rec.src_spc, rec.src_db, name,
@@ -766,6 +781,8 @@ dbcopy_identify(uint8 info)
 		return "DIRXACT";
 	if ((info & ~XLR_INFO_MASK) == XLOG_GP_CORE_DIRXACT_END)
 		return "DIRXACT_END";
+	if ((info & ~XLR_INFO_MASK) == XLOG_GP_CORE_GXID)
+		return "GXID";
 	return NULL;
 }
 

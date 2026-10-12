@@ -33,9 +33,10 @@
  * PostgreSQL's wiki lists as taken (CustomWALResourceManagers), and none of
  * the port's others (gp_sql's 198, PAX's 199, gp_ao's 200 and 201).
  * gp_dbcopy.c registers it; its records are a database's directory copied,
- * the nodes' states as the coordinator publishes them (gp_cluster.c), and a
+ * the nodes' states as the coordinator publishes them (gp_cluster.c), a
  * prepared part's file of what its directories are to become, written and
- * removed (gp_dirxact.c).
+ * removed (gp_dirxact.c), and the transaction IDs the coordinator gives to
+ * nobody again (gp_dtx.c).
  */
 #define GP_CORE_RMGR_ID			197
 
@@ -43,6 +44,7 @@
 #define XLOG_GP_CORE_CLUSTER	0x10	/* the nodes' states, gpsegconfig_dump */
 #define XLOG_GP_CORE_DIRXACT	0x20	/* a prepared part's file, written */
 #define XLOG_GP_CORE_DIRXACT_END	0x30	/* and removed */
+#define XLOG_GP_CORE_GXID		0x40	/* transaction IDs, given to nobody again */
 
 /*
  * The rest of CREATE DATABASE, where a node runs createdb() itself (gp_ddl.c,

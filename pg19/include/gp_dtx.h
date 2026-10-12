@@ -79,6 +79,15 @@ extern void GpDtxFormLoopbackGid(FullTransactionId gxid, Oid dboid, char *gid);
 extern bool GpDtxParseGid(const char *gid, FullTransactionId *gxid);
 
 /*
+ * The coordinator: this transaction's ID, which its parts on the segments
+ * are about to be prepared, or one of them committed, under -- and which its
+ * WAL says it gives to nobody again, before this returns (gp_dtx.c).  And
+ * the redo of the record that says so.
+ */
+extern FullTransactionId GpDtxGxid(void);
+extern void GpDtxRedoGxid(const char *data, int len);
+
+/*
  * The coordinator: the distributed snapshot a snapshot of it stands for, as
  * the setting above carries it to the segments.
  */

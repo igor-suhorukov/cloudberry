@@ -4321,7 +4321,7 @@ gang_commit_first_phase(GpGang *g)
 	if (nwriters == 1 && !TransactionIdIsValid(GetTopTransactionIdIfAny()) &&
 		!GpLoopbackHasWrites())
 	{
-		FullTransactionId gxid = GetTopFullTransactionId();
+		FullTransactionId gxid = GpDtxGxid();
 
 		/* the others' COMMIT is a one-phase commit of nothing */
 		dtx_report("Distributed Commit (one-phase)", writers, 1, true);
@@ -4344,7 +4344,7 @@ gang_commit_first_phase(GpGang *g)
 	notices_quiet++;
 	if (nwriters > 0)
 	{
-		GpDtxFormGid(GetTopFullTransactionId(), dtx_gid);
+		GpDtxFormGid(GpDtxGxid(), dtx_gid);
 		ForceSyncCommit();
 		if (dtx_prepared_size < g->nconns)
 		{
