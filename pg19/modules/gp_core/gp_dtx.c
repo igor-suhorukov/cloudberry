@@ -158,6 +158,8 @@
 #include "access/xact.h"
 #include "access/xlog.h"
 #include "access/xloginsert.h"
+#include "access/xlogrecovery.h"
+#include "access/xlogwait.h"
 #include "catalog/index.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
@@ -173,12 +175,14 @@
 #include "libpq-fe.h"
 #include "libpq/libpq-be-fe-helpers.h"
 #include "miscadmin.h"
+#include "parser/analyze.h"
 #include "port/pg_lfind.h"
 #include "postmaster/bgworker.h"
 #include "postmaster/interrupt.h"
 #include "postmaster/postmaster.h"
 #include "replication/slot.h"
 #include "replication/syncrep.h"
+#include "replication/walreceiver.h"
 #include "storage/dsm_registry.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
@@ -212,6 +216,7 @@
 #include "gp_dispatch.h"
 #include "gp_dbcopy.h"
 #include "gp_dtx.h"
+#include "gp_dtx_standby.h"
 #include "gp_settings.h"
 #include "gp_fault.h"
 #include "gp_gdd.h"
@@ -331,6 +336,24 @@ GpDtxSnapshotString(Snapshot snapshot)
 	if (snapshot == NULL || snapshot->snapshot_type != SNAPSHOT_MVCC)
 		return NULL;
 
+	/*
+	 * A hot standby coordinator's snapshot has no transaction in xip, and
+	 * its distributed snapshot hides the transactions in their second phase
+	 * besides: the same for a snapshot each time it is asked, which is
+	 * gp_dtx_standby.c's to keep.  Not before the standby knows them.
+	 */
+	if (snapshot->takenDuringRecovery)
+	{
+		GpDtxStandbyWaitKnown();
+		if (last != NULL)
+			pfree(last);
+		str = dtx_snapshot_string(snapshot);
+		last = MemoryContextStrdup(TopMemoryContext, str);
+		pfree(str);
+		last_snapshot = NULL;
+		return last;
+	}
+
 	if (last != NULL && snapshot == last_snapshot &&
 		snapshot->xmin == last_xmin && snapshot->xmax == last_xmax &&
 		snapshot->xcnt == last_xcnt)
@@ -368,32 +391,86 @@ GpDtxHorizonString(void)
 	return str;
 }
 
+/*
+ * A snapshot of the coordinator's, as the setting carries it.
+ *
+ * A hot standby coordinator's is a snapshot of the same transactions, the
+ * coordinator's, as far as the standby has replayed them: the ones in
+ * progress are all in subxip, top-level ones and subtransactions alike, as
+ * a snapshot taken in recovery has them (the subtransactions are no
+ * distributed transaction's ID, and say nothing).  With them go the
+ * transactions in their second phase, which the snapshot has committed and
+ * the mirrors may not (GpDtxStandbyHidden()); its xmin is lowered to the
+ * oldest of them.
+ *
+ * "prune", on a coordinator that writes, is no later than the oldest
+ * transaction in its second phase either: one whose backend left it to the
+ * recovery process has ended for every snapshot here, and a segment that
+ * forgot its part then would have a mirror that could not hide it from the
+ * standby's queries.  A mirror forgets nothing by a standby's word.
+ */
 static char *
 dtx_snapshot_string(Snapshot snapshot)
 {
 	FullTransactionId next;
 	FullTransactionId *xip;
+	FullTransactionId fxmin;
+	FullTransactionId fprune;
+	FullTransactionId committing;
 	TransactionId prune;
 	StringInfoData buf;
+	int			n = 0;
 
 	next = ReadNextFullTransactionId();
 	prune = GetOldestTransactionIdConsideredRunning();
 	if (TransactionIdPrecedes(snapshot->xmin, prune))
 		prune = snapshot->xmin;
+	fxmin = FullTransactionIdFromAllowableAt(next, snapshot->xmin);
+	fprune = FullTransactionIdFromAllowableAt(next, prune);
 
-	xip = palloc_array(FullTransactionId, Max(snapshot->xcnt, 1));
-	for (uint32 i = 0; i < snapshot->xcnt; i++)
-		xip[i] = FullTransactionIdFromAllowableAt(next, snapshot->xip[i]);
-	qsort(xip, snapshot->xcnt, sizeof(FullTransactionId), fxid_cmp);
+	if (snapshot->takenDuringRecovery)
+	{
+		const uint64 *hidden;
+		int			nhidden = GpDtxStandbyHidden(snapshot, &hidden);
+
+		xip = palloc_array(FullTransactionId, Max(snapshot->subxcnt + nhidden, 1));
+		for (int32 i = 0; i < snapshot->subxcnt; i++)
+			xip[n++] = FullTransactionIdFromAllowableAt(next, snapshot->subxip[i]);
+		for (int i = 0; i < nhidden; i++)
+		{
+			xip[n] = FullTransactionIdFromU64(hidden[i]);
+			if (FullTransactionIdPrecedes(xip[n], fxmin))
+				fxmin = xip[n];
+			n++;
+		}
+		if (FullTransactionIdPrecedes(fxmin, fprune))
+			fprune = fxmin;
+	}
+	else
+	{
+		xip = palloc_array(FullTransactionId, Max(snapshot->xcnt, 1));
+		for (uint32 i = 0; i < snapshot->xcnt; i++)
+			xip[n++] = FullTransactionIdFromAllowableAt(next, snapshot->xip[i]);
+		committing = GpDtxCommittingOldest();
+		if (FullTransactionIdIsValid(committing) &&
+			FullTransactionIdPrecedes(committing, fprune))
+			fprune = committing;
+	}
+	qsort(xip, n, sizeof(FullTransactionId), fxid_cmp);
 
 	initStringInfo(&buf);
 	appendStringInfo(&buf, UINT64_FORMAT ":" UINT64_FORMAT ":" UINT64_FORMAT ":",
-					 U64FromFullTransactionId(FullTransactionIdFromAllowableAt(next, snapshot->xmin)),
+					 U64FromFullTransactionId(fxmin),
 					 U64FromFullTransactionId(FullTransactionIdFromAllowableAt(next, snapshot->xmax)),
-					 U64FromFullTransactionId(FullTransactionIdFromAllowableAt(next, prune)));
-	for (uint32 i = 0; i < snapshot->xcnt; i++)
-		appendStringInfo(&buf, "%s" UINT64_FORMAT, i > 0 ? "," : "",
+					 U64FromFullTransactionId(fprune));
+	for (int i = 0, written = 0; i < n; i++)
+	{
+		/* each once: a transaction in its second phase may be in subxip too */
+		if (i > 0 && FullTransactionIdEquals(xip[i], xip[i - 1]))
+			continue;
+		appendStringInfo(&buf, "%s" UINT64_FORMAT, written++ > 0 ? "," : "",
 						 U64FromFullTransactionId(xip[i]));
+	}
 	pfree(xip);
 	return buf.data;
 }
@@ -1435,6 +1512,10 @@ xid_append(TransactionId **arr, int *n, int *max, TransactionId xid)
  * is hidden -- as it is when the snapshot is one this made already: what the
  * map gained since was in progress for it.
  */
+static Snapshot dtx_crafted(Snapshot snap, const TransactionId *top, int ntop,
+							const TransactionId *sub, int nsub, bool unknown,
+							TransactionId xmin);
+
 static Snapshot
 dtx_craft(Snapshot snap, const GpDtxSnapshot *ds)
 {
@@ -1447,7 +1528,6 @@ dtx_craft(Snapshot snap, const GpDtxSnapshot *ds)
 	bool		unknown = false;
 	TransactionId xmin = snap->xmin;
 	GpDtxEntry *e;
-	Snapshot	crafted;
 
 	dtx_attach();
 	LWLockAcquire(&dtx_shared->lock, LW_SHARED);
@@ -1502,6 +1582,27 @@ dtx_craft(Snapshot snap, const GpDtxSnapshot *ds)
 	}
 	LWLockRelease(&dtx_shared->lock);
 
+	return dtx_crafted(snap, top, ntop, sub, nsub, unknown, xmin);
+}
+
+/*
+ * A snapshot with these transactions in progress besides: top-level ones,
+ * and subtransactions of theirs; "unknown" says some of their
+ * subtransactions are not among them.  The snapshot itself when there are
+ * none.
+ *
+ * A snapshot taken in recovery keeps every transaction in subxip, and looks
+ * a transaction's top-level one up in pg_subtrans first where it has
+ * overflowed (XidInMVCCSnapshot()), so all of them go there, whatever is
+ * known of their subtransactions.
+ */
+static Snapshot
+dtx_crafted(Snapshot snap, const TransactionId *top, int ntop,
+			const TransactionId *sub, int nsub, bool unknown,
+			TransactionId xmin)
+{
+	Snapshot	crafted;
+
 	if (ntop == 0)
 		return snap;
 
@@ -1514,8 +1615,9 @@ dtx_craft(Snapshot snap, const GpDtxSnapshot *ds)
 	memset(&crafted->ph_node, 0, sizeof(crafted->ph_node));
 	crafted->xmin = xmin;
 
-	if (!snap->suboverflowed && !unknown &&
-		snap->subxcnt + ntop + nsub <= GetMaxSnapshotSubxidCount())
+	if (snap->takenDuringRecovery ||
+		(!snap->suboverflowed && !unknown &&
+		 snap->subxcnt + ntop + nsub <= GetMaxSnapshotSubxidCount()))
 	{
 		crafted->subxip = palloc((snap->subxcnt + ntop + nsub) * sizeof(TransactionId));
 		if (snap->subxcnt > 0)
@@ -1546,6 +1648,208 @@ dtx_craft(Snapshot snap, const GpDtxSnapshot *ds)
 	}
 
 	return crafted;
+}
+
+/* Is the transaction in progress for the snapshot already, or hidden so far? */
+static bool
+xid_in_progress_for(Snapshot snap, TransactionId xid, const TransactionId *more,
+					int nmore)
+{
+	return !TransactionIdPrecedes(xid, snap->xmax) ||
+		(snap->xcnt > 0 && pg_lfind32(xid, snap->xip, snap->xcnt)) ||
+		(snap->subxcnt > 0 && pg_lfind32(xid, snap->subxip, snap->subxcnt)) ||
+		(nmore > 0 && pg_lfind32(xid, more, nmore));
+}
+
+/*
+ * A MIRROR'S SNAPSHOT, for a statement a hot standby coordinator sent it
+ * (gp_dtx_standby.c): made to agree with the distributed one as a primary's
+ * is, but by the distributed log, not the map.  The map is the primary's
+ * memory -- a mirror has none of it, and one it filled would be a promoted
+ * primary's map of parts whose ends nobody had told it.  The log's rows a
+ * mirror has from the WAL, each with the commit of the part that wrote it:
+ * a row this snapshot sees is a part that has committed for it, and where
+ * the distributed snapshot sees that part's transaction in progress, the
+ * part is hidden -- its subtransactions with it, and the local transactions
+ * that follow it (GpDtxFollowCommitted()).  A part only prepared here is in
+ * progress for the snapshot as it is.
+ *
+ * What the standby's snapshot says committed is committed here, or was
+ * waited for as the distributed snapshot arrived (dtx_mirror_catch_up()).
+ * What a mirror cannot do is keep what its primary has removed: a part's
+ * row once VACUUM has taken it, or the row versions the part deleted.  The
+ * primary holds both back for the coordinator's snapshots and for the
+ * transactions in their second phase (gp_dtx_horizon, and "prune" in
+ * dtx_snapshot_string()), not for a snapshot of the standby's: one older
+ * than all of those -- of a transaction block long open there, of a standby
+ * far behind -- may meet a part it should hide and no row to hide it by,
+ * unless PostgreSQL's own conflict with recovery cancels it first.
+ */
+static Snapshot
+dtx_craft_mirror(Snapshot snap, const GpDtxSnapshot *ds)
+{
+	Oid			relid = log_relid();
+	TransactionId *hide = NULL;
+	int			nhide = 0,
+				maxhide = 0;
+	TransactionId xmin = snap->xmin;
+	Relation	rel;
+	List	   *indexes;
+	Relation	index;
+	ScanKeyData key;
+	int			found;
+
+	if (!OidIsValid(relid))
+		return snap;
+	rel = table_open(relid, AccessShareLock);
+	indexes = RelationGetIndexList(rel);
+	if (indexes == NIL)
+	{
+		table_close(rel, AccessShareLock);
+		return snap;
+	}
+	index = index_open(linitial_oid(indexes), AccessShareLock);
+	ScanKeyInit(&key, 1, BTGreaterEqualStrategyNumber, F_XID8GE,
+				FullTransactionIdGetDatum(ds->xmin));
+
+	/*
+	 * Read again for as long as a reading hides something new: a part
+	 * deletes the rows of older ones as it writes its own (log_prune()),
+	 * and a part hidden has deleted nothing for this statement -- the row
+	 * of a transaction it deleted is there again once the part is hidden,
+	 * and that transaction may be one to hide as well.
+	 */
+	do
+	{
+		Snapshot	with = dtx_crafted(snap, hide, nhide, NULL, 0, false, xmin);
+		Snapshot	read = with == snap ? snap : RegisterSnapshot(with);
+		SysScanDesc scan = systable_beginscan_ordered(rel, index, read, 1, &key);
+		HeapTuple	tup;
+
+		found = 0;
+		while ((tup = systable_getnext_ordered(scan, ForwardScanDirection)) != NULL)
+		{
+			bool		isnull;
+			FullTransactionId gxid;
+			TransactionId xid;
+			Datum		children;
+
+			gxid = DatumGetFullTransactionId(heap_getattr(tup, 1, RelationGetDescr(rel), &isnull));
+			if (!dtx_in_progress(ds, gxid))
+				continue;
+			xid = XidFromFullTransactionId(DatumGetFullTransactionId(heap_getattr(tup, 2, RelationGetDescr(rel), &isnull)));
+			if (!xid_in_progress_for(snap, xid, hide, nhide))
+			{
+				xid_append(&hide, &nhide, &maxhide, xid);
+				if (TransactionIdPrecedes(xid, xmin))
+					xmin = xid;
+				found++;
+			}
+			children = heap_getattr(tup, 4, RelationGetDescr(rel), &isnull);
+			if (!isnull)
+			{
+				Datum	   *elems;
+				int			n;
+
+				deconstruct_array(DatumGetArrayTypeP(children), XIDOID,
+								  sizeof(TransactionId), true, TYPALIGN_INT,
+								  &elems, NULL, &n);
+				for (int i = 0; i < n; i++)
+				{
+					TransactionId child = DatumGetTransactionId(elems[i]);
+
+					if (!xid_in_progress_for(snap, child, hide, nhide))
+					{
+						xid_append(&hide, &nhide, &maxhide, child);
+						found++;
+					}
+				}
+			}
+		}
+		systable_endscan_ordered(scan);
+		if (read != snap)
+			UnregisterSnapshot(read);
+	} while (found > 0);
+	index_close(index, AccessShareLock);
+	list_free(indexes);
+	table_close(rel, AccessShareLock);
+
+	return dtx_crafted(snap, hide, nhide, NULL, 0, false, xmin);
+}
+
+/*
+ * A HOT STANDBY COORDINATOR'S OWN SNAPSHOT: what it reads its own tables
+ * with says of the transactions in their second phase what the distributed
+ * snapshot it sends says of them, that they are in progress
+ * (GpDtxStandbyHidden()) -- a transaction's row in a catalog here is seen
+ * when its rows on the mirrors are.
+ */
+static Snapshot
+dtx_craft_standby(Snapshot snap)
+{
+	const uint64 *hidden;
+	int			nhidden = GpDtxStandbyHidden(snap, &hidden);
+	TransactionId *hide = NULL;
+	int			nhide = 0,
+				maxhide = 0;
+	TransactionId xmin = snap->xmin;
+
+	for (int i = 0; i < nhidden; i++)
+	{
+		TransactionId xid = XidFromFullTransactionId(FullTransactionIdFromU64(hidden[i]));
+
+		if (xid_in_progress_for(snap, xid, hide, nhide))
+			continue;
+		xid_append(&hide, &nhide, &maxhide, xid);
+		if (TransactionIdPrecedes(xid, xmin))
+			xmin = xid;
+	}
+	return dtx_crafted(snap, hide, nhide, NULL, 0, false, xmin);
+}
+
+/*
+ * A dispatched statement is the node's to run only as the node its
+ * dispatcher took it for: a mirror's from a hot standby coordinator, whose
+ * gang is of mirrors, a primary's from the coordinator.  A mirror promoted
+ * under a standby's gang refuses, in Cloudberry's words (exec_mpp_query(),
+ * tcop/postgres.c), and so would a mirror a coordinator reached.
+ */
+static void
+dtx_check_dispatcher(void)
+{
+	bool		recovering = RecoveryInProgress();
+
+	if (GpClusterDispatchedByStandby() == recovering)
+		return;
+	ereport(ERROR,
+			(errcode(ERRCODE_PROTOCOL_VIOLATION),
+			 recovering ?
+			 errmsg("mirror segments can only process MPP protocol messages from standby QD") :
+			 errmsg("primary segments can only process MPP protocol messages from primary QD"),
+			 errhint("Exit the current session and re-connect.")));
+}
+
+/*
+ * A mirror, as a distributed snapshot arrives: no further behind than the
+ * standby coordinator that took it.  What that snapshot says committed, the
+ * primary had committed and this mirror, in sync, had on disk before the
+ * standby could have replayed the word of it -- a one-phase part before the
+ * coordinator's commit record was written, a second phase before the
+ * coordinator forgot the transaction -- so the mirror replays what its WAL
+ * receiver has flushed before the statement takes its snapshot.  Cloudberry
+ * leaves this to synchronous_commit = remote_apply on every node; with it
+ * there is nothing to wait for here.
+ */
+static void
+dtx_mirror_catch_up(void)
+{
+	XLogRecPtr	target = GetWalRcvFlushRecPtr(NULL, NULL);
+
+	if (!XLogRecPtrIsValid(target) || GetXLogReplayRecPtr(NULL) >= target)
+		return;
+	if (WaitForLSN(WAIT_LSN_TYPE_STANDBY_REPLAY, target, 0) ==
+		WAIT_LSN_RESULT_NOT_IN_RECOVERY)
+		dtx_check_dispatcher();
 }
 
 /*
@@ -1663,7 +1967,10 @@ dtx_executor_start(QueryDesc *queryDesc, int eflags)
 			 queryDesc->plannedstmt->rowMarks != NIL))
 			GP_FAULT("before_get_distributed_xid");
 
-		crafted = dtx_craft(queryDesc->snapshot, ds);
+		/* a mirror's, for a hot standby coordinator's statement */
+		dtx_check_dispatcher();
+		crafted = RecoveryInProgress() ? dtx_craft_mirror(queryDesc->snapshot, ds)
+			: dtx_craft(queryDesc->snapshot, ds);
 		if (crafted != queryDesc->snapshot)
 		{
 			Snapshot	old = queryDesc->snapshot;
@@ -1688,6 +1995,43 @@ dtx_executor_start(QueryDesc *queryDesc, int eflags)
 			UnregisterSnapshot(old);
 			dtx_lower_xmin(made->xmin);
 		}
+	}
+	else if (queryDesc->snapshot != NULL &&
+			 queryDesc->snapshot->snapshot_type == SNAPSHOT_MVCC &&
+			 queryDesc->snapshot->takenDuringRecovery &&
+			 queryDesc->snapshot == GetActiveSnapshot() &&
+			 GpClusterStandbyDispatch() && !IsParallelWorker())
+	{
+		/* a hot standby coordinator's own; see dtx_craft_standby() */
+		Snapshot	crafted = dtx_craft_standby(queryDesc->snapshot);
+
+		if (crafted != queryDesc->snapshot)
+		{
+			Snapshot	old = queryDesc->snapshot;
+			Snapshot	made = RegisterSnapshot(crafted);
+
+			PopActiveSnapshot();
+			if (ActivePortal != NULL && ActivePortal->portalSnapshot == old)
+			{
+				PushActiveSnapshotWithLevel(made, ActivePortal->createLevel);
+				ActivePortal->portalSnapshot = GetActiveSnapshot();
+			}
+			else
+				PushActiveSnapshot(made);
+			queryDesc->snapshot = made;
+			UnregisterSnapshot(old);
+			dtx_lower_xmin(made->xmin);
+		}
+
+		/*
+		 * Cloudberry's fault once a SELECT's portal has the snapshot it runs
+		 * with (PortalStart(), pquery.c), which a test holds a standby's
+		 * query at: what it hides is settled, and nothing is dispatched yet.
+		 */
+		if (gp_fault_active != NULL && *gp_fault_active > 0 &&
+			queryDesc->operation == CMD_SELECT &&
+			queryDesc->sourceText == debug_query_string)
+			GP_FAULT("select_after_qd_create_snapshot");
 	}
 
 	/*
@@ -1749,6 +2093,18 @@ dtx_snapshot_arrived(void)
 
 	if (ds == NULL)
 		return;
+
+	/*
+	 * A mirror, for a hot standby coordinator's statement: it replays what
+	 * it has, keeps no map and forgets nothing (dtx_craft_mirror()).
+	 */
+	dtx_check_dispatcher();
+	if (RecoveryInProgress())
+	{
+		dtx_mirror_catch_up();
+		return;
+	}
+
 	dtx_attach();
 	map_load();
 
@@ -2541,6 +2897,8 @@ dtx_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 				case TRANS_STMT_PREPARE:
 					dtx_check_gid_reserved(ts->gid);
 					dtx_preparing = gxid;
+					/* Cloudberry's, as its segment begins to prepare (cdbtm.c) */
+					GP_FAULT("qe_start_prepared");
 					break;
 				case TRANS_STMT_COMMIT_PREPARED:
 				case TRANS_STMT_ROLLBACK_PREPARED:
@@ -2566,6 +2924,21 @@ dtx_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	else if (!IsA(parsetree, VariableSetStmt) &&
 			 context == PROCESS_UTILITY_TOPLEVEL && queryString == debug_query_string)
 		dtx_note_statement();
+
+	/*
+	 * Cloudberry's two of a segment's COMMIT PREPARED (cdbtm.c): as it
+	 * begins, and once it is done -- the second its tests set to fail every
+	 * time, for a transaction that cannot finish, the coordinator sending
+	 * the second phase again for as long.  Here a part that has committed is
+	 * done with, whatever its answer, and a part gone is no failure; so
+	 * that fault too comes before the part commits, and leaves it prepared:
+	 * a second phase that fails until the fault is reset.
+	 */
+	if (finishing && commit)
+	{
+		GP_FAULT("qe_start_commit_prepared");
+		GP_FAULT("finish_commit_prepared");
+	}
 
 	/* Cloudberry's, at the start of FinishPreparedTransaction() (twophase.c) */
 	if (finishing)
@@ -2690,6 +3063,7 @@ typedef enum DtxOutcome
 	DTX_COMMITTED,
 	DTX_ABORTED,
 	DTX_UNKNOWN,				/* in the future, or older than the clog */
+	DTX_YOUNG,					/* not asked: its part is too young for the round */
 } DtxOutcome;
 
 /*
@@ -2856,7 +3230,10 @@ recovery_count(DtxProgress which, int64 value)
 	LWLockRelease(&dtx_shared->lock);
 }
 
-/* A part a round found prepared on a node, and what became of its transaction. */
+/*
+ * A part a round found prepared on a node, what became of its transaction,
+ * and whether the round finished the part.
+ */
 typedef struct RecoveryPart
 {
 	const GpSegmentConfig *node;
@@ -2864,6 +3241,7 @@ typedef struct RecoveryPart
 	char	   *dbname;
 	FullTransactionId gxid;
 	DtxOutcome	outcome;
+	bool		finished;
 } RecoveryPart;
 
 /* How many distributed transactions the parts of this outcome are. */
@@ -2962,7 +3340,7 @@ recovery_finish(const RecoveryPart *part)
  * refused is logged, and left for the next round, as it always was.
  */
 static bool
-recovery_finish_all(const RecoveryPart *parts, int nparts, DtxOutcome outcome,
+recovery_finish_all(RecoveryPart *parts, int nparts, DtxOutcome outcome,
 					DtxProgress done)
 {
 	bool		complete = true;
@@ -2986,6 +3364,7 @@ recovery_finish_all(const RecoveryPart *parts, int nparts, DtxOutcome outcome,
 				!FullTransactionIdEquals(parts[j].gxid, parts[i].gxid))
 				continue;
 			finish = recovery_finish(&parts[j]);
+			parts[j].finished = finish == FINISH_DONE;
 			if (finish != FINISH_DONE)
 				all = false;
 			if (finish == FINISH_UNREACHED)
@@ -3023,9 +3402,22 @@ recovery_round(int min_age, bool startup)
 	RecoveryPart *parts = NULL;
 	int			nparts = 0;
 	int			maxparts = 0;
+	uint64	   *left;
+	int			nleft;
+	bool		left_full = false;
+	bool		reached = true;
 
 	recovery_phase(startup ? DTX_PHASE_INITIALIZING : DTX_PHASE_GATHER_ORPHANED,
 				   true);
+
+	/*
+	 * The transactions in their second phase that are this process's to
+	 * forget (gp_dtx_standby.c), as the round begins: those whose backend
+	 * left them, and those the redo of a restart or of a standby's life
+	 * left.  Nobody else is finishing a part of theirs, so what a round
+	 * that reaches every node finds of them is all there is.
+	 */
+	nleft = GpDtxAbandonedList(&left);
 
 	/*
 	 * The primaries FTS last published: a part prepared on a primary it
@@ -3046,6 +3438,7 @@ recovery_round(int min_age, bool startup)
 		if (conn == NULL)
 		{
 			complete = false;
+			reached = false;
 			continue;
 		}
 
@@ -3064,6 +3457,7 @@ recovery_round(int min_age, bool startup)
 			PQclear(res);
 			libpqsrv_disconnect(conn);
 			complete = false;
+			reached = false;
 			continue;
 		}
 
@@ -3075,9 +3469,17 @@ recovery_round(int min_age, bool startup)
 			FullTransactionId gxid;
 			DtxOutcome	outcome;
 
-			if (!GpDtxParseGid(gid, &gxid) || age < min_age)
+			if (!GpDtxParseGid(gid, &gxid))
 				continue;
-			outcome = dtx_outcome(gxid);
+			outcome = age < min_age ? DTX_YOUNG : dtx_outcome(gxid);
+
+			/*
+			 * One that committed here and nobody has as a transaction in its
+			 * second phase is one a restart left, which no backend finishes:
+			 * this process's from now, with the ones above.
+			 */
+			if (outcome == DTX_COMMITTED && GpDtxNoteInDoubt(gxid, &left_full))
+				left[nleft++] = U64FromFullTransactionId(gxid);
 			if (outcome == DTX_UNKNOWN)
 			{
 				ereport(WARNING,
@@ -3098,6 +3500,7 @@ recovery_round(int min_age, bool startup)
 			parts[nparts].dbname = pstrdup(dbname);
 			parts[nparts].gxid = gxid;
 			parts[nparts].outcome = outcome;
+			parts[nparts].finished = false;
 			nparts++;
 		}
 		PQclear(res);
@@ -3131,6 +3534,33 @@ recovery_round(int min_age, bool startup)
 		recovery_phase(DTX_PHASE_ABORT_IN_DOUBT, true);
 	if (!recovery_finish_all(parts, nparts, DTX_ABORTED, DTX_IN_DOUBT_ABORTED))
 		complete = false;
+
+	/*
+	 * Every node's prepared parts were read: each transaction that was this
+	 * process's to forget and has no part left unfinished is in its second
+	 * phase no more -- every part of it is committed, or it never committed
+	 * -- and the WAL says so, for a hot standby coordinator's queries.  And
+	 * every transaction a restart left in its second phase has been found,
+	 * so the set is whole, where there was room for them all.
+	 */
+	if (reached)
+	{
+		for (int i = 0; i < nleft; i++)
+		{
+			FullTransactionId gxid = FullTransactionIdFromU64(left[i]);
+			bool		unfinished = false;
+
+			if (dtx_outcome(gxid) == DTX_IN_PROGRESS)
+				continue;
+			for (int j = 0; j < nparts && !unfinished; j++)
+				unfinished = FullTransactionIdEquals(parts[j].gxid, gxid) &&
+					!parts[j].finished;
+			if (!unfinished)
+				GpDtxForget(gxid, false);
+		}
+		GpDtxSetGathered(!left_full);
+	}
+	pfree(left);
 
 	recovery_phase(DTX_PHASE_INITIALIZING, false);
 	for (int i = 0; i < nparts; i++)
@@ -3487,6 +3917,15 @@ GpDtxRecoveryMain(Datum main_arg)
 				journals_due = !recovery_journals();
 			}
 		}
+
+		/*
+		 * A transaction still in its second phase and this process's to
+		 * finish -- a part of it refused, or its node not reached -- is
+		 * tried again soon, whatever its age: a hot standby coordinator's
+		 * queries see it in progress until then.
+		 */
+		if (GpDtxAnyAbandoned())
+			everything = true;
 
 		rc = WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
 					   (everything ? 5 : dtx_recovery_interval) * 1000L,
@@ -4022,6 +4461,30 @@ dtx_isolation_install(void)
 						PGC_POSTMASTER, PGC_S_FILE);
 }
 
+/*
+ * Cloudberry's fault before a SELECT's portal takes the snapshot it runs
+ * with (PortalStart(), pquery.c), which a test holds a hot standby
+ * coordinator's query at: here, the client's statement analysed and not yet
+ * planned -- by either planner -- nor begun.  Under READ COMMITTED the
+ * snapshot it is analysed and planned with is not the one it runs with,
+ * which its portal takes after.  The one after that snapshot is in
+ * dtx_executor_start().
+ */
+static post_parse_analyze_hook_type prev_post_parse_analyze = NULL;
+
+static void
+dtx_post_parse_analyze(ParseState *pstate, Query *query,
+					   const JumbleState *jstate)
+{
+	if (prev_post_parse_analyze)
+		prev_post_parse_analyze(pstate, query, jstate);
+
+	if (gp_fault_active != NULL && *gp_fault_active > 0 &&
+		query->commandType == CMD_SELECT && pstate->parentParseState == NULL &&
+		pstate->p_sourcetext == debug_query_string && !GpClusterIsDispatched())
+		(void) GP_FAULT("select_before_qd_create_snapshot");
+}
+
 void
 GpDtxInit(void)
 {
@@ -4132,7 +4595,14 @@ GpDtxInit(void)
 	 */
 	self = GpClusterSelf();
 	if (self != NULL && self->content == -1)
+	{
 		dtx_register_recovery();
+
+		/* and, a coordinator or its standby, the commits in their second phase */
+		GpDtxStandbyInit();
+		prev_post_parse_analyze = post_parse_analyze_hook;
+		post_parse_analyze_hook = dtx_post_parse_analyze;
+	}
 	else if (self != NULL && self->content >= 0)
 		dtx_register_keeper();
 }

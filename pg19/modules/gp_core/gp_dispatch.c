@@ -131,6 +131,7 @@
 #include "gp_dispatch.h"
 #include "gp_dtm_debug.h"
 #include "gp_dtx.h"
+#include "gp_dtx_standby.h"
 #include "gp_endpoint.h"
 #include "gp_fault.h"
 #include "gp_fts.h"
@@ -778,6 +779,16 @@ static bool dtx_all_prepared = false;
  */
 static bool dtx_logged_before_commit = false;
 
+/*
+ * The transaction's ID, and whether the WAL says it is one in its second
+ * phase (GpDtxCommitting(), gp_dtx_standby.c), from the end of the first to
+ * the end of the second, or to an abort before its commit record.  And
+ * whether one segment committed it in one phase.
+ */
+static FullTransactionId dtx_gxid = {0};
+static bool dtx_committing = false;
+static bool dtx_one_phase = false;
+
 /* Names the cursors of the gathers of one transaction apart. */
 static uint32 gather_counter = 0;
 
@@ -1160,11 +1171,15 @@ qe_identity_option(int content)
 	 * takes it from each statement: a segment that ran before gpexpand added
 	 * one has the old number in its file (gp_cluster.c).  It is fixed for the
 	 * gang's life -- the gang is let go of before the session takes another
-	 * (gp_expand.c) -- so the connection is where it goes.
+	 * (gp_expand.c) -- so the connection is where it goes.  And a last word
+	 * where the session is a hot standby coordinator's, whose gang is of
+	 * mirrors: a segment process tells by it that what it is asked, it is
+	 * asked as the node its coordinator took it for (gp_dtx.c).
 	 */
-	char	   *option = psprintf("-c gp.qe_identity=seg%d/dbid%d/sess%d/nseg%d",
+	char	   *option = psprintf("-c gp.qe_identity=seg%d/dbid%d/sess%d/nseg%d%s",
 									content, GpClusterDbid(), GpClusterSessionId(),
-									GpClusterSegmentCount());
+									GpClusterSegmentCount(),
+									GpClusterStandbyDispatch() ? "/standby" : "");
 
 	/* And the secret, which says it is this coordinator; see gp_cluster.c. */
 	if (GpClusterHasSecret())
@@ -1430,6 +1445,7 @@ typedef enum GpConnFailure
 	CONN_TIMEOUT,				/* the deadline came first */
 	CONN_NO_DETAILS,			/* its backend is no segment process */
 	CONN_REFUSED_BY_FAULT,		/* a fault's FATAL */
+	CONN_PROMOTED,				/* a standby's gang: a mirror no more */
 	CONN_REFUSED,				/* anything else libpq says */
 } GpConnFailure;
 
@@ -1448,7 +1464,7 @@ connect_failed(GpConnAttempt *attempts, int n, GpConnAttempt *failed,
 
 	GpFtsNotifyProber();
 	for (int i = 0; i < n; i++)
-		if (!GpClusterIsPrimaryNow(attempts[i].seg->dbid))
+		if (!GpClusterIsGangNodeNow(attempts[i].seg->dbid))
 			ereport(ERROR,
 					(errcode(ERRCODE_CONNECTION_FAILURE),
 					 errmsg("failed to acquire resources on one or more segments"),
@@ -1456,6 +1472,13 @@ connect_failed(GpConnAttempt *attempts, int n, GpConnAttempt *failed,
 
 	switch (failure)
 	{
+		case CONN_PROMOTED:
+			ereport(ERROR,
+					(errcode(ERRCODE_CONNECTION_FAILURE),
+					 errmsg("failed to acquire resources on one or more segments"),
+					 errdetail("The mirror is out of recovery: a standby coordinator dispatches to mirrors\n (%s)",
+							   whoami)));
+			break;
 		case CONN_TIMEOUT:
 			ereport(ERROR,
 					(errcode(ERRCODE_CONNECTION_FAILURE),
@@ -1494,6 +1517,9 @@ connect_failed(GpConnAttempt *attempts, int n, GpConnAttempt *failed,
  * standby until the promotion takes, takes it and says so (in_hot_standby),
  * and could not write.  And a connection made whose backend did not say it
  * is a segment process of this coordinator's (gp.qe_details) is not one.
+ * A hot standby coordinator's gang is the other way about: its nodes are
+ * mirrors, hot standbys all, and one that says it is none has been promoted
+ * since the standby last heard, which fails the gang.
  *
  * Every connection or none: what fails fails them all, in Cloudberry's
  * words, once FTS has been asked to probe and waited for, as Cloudberry's
@@ -1505,6 +1531,7 @@ static void
 connect_segments(GpConnAttempt *attempts, int n)
 {
 	int			retries = 0;
+	bool		standby = GpClusterStandbyDispatch();
 
 	PG_TRY();
 	{
@@ -1537,7 +1564,15 @@ connect_segments(GpConnAttempt *attempts, int n)
 					const char *hot_standby = PQparameterStatus(a->conn, "in_hot_standby");
 					const char *details = PQparameterStatus(a->conn, "gp.qe_details");
 
-					if (hot_standby != NULL && strcmp(hot_standby, "on") == 0)
+					bool		recovering = hot_standby != NULL &&
+						strcmp(hot_standby, "on") == 0;
+
+					if (standby && !recovering)
+					{
+						failed = a;
+						failure = CONN_PROMOTED;
+					}
+					else if (!standby && recovering)
 					{
 						conn_attempt_drop(a);
 						in_recovery = true;
@@ -1678,6 +1713,31 @@ gang_connect(void)
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("only the coordinator dispatches to the segments"),
 				 errdetail("This node has content id %d.", GpClusterContentId())));
+
+	/*
+	 * A hot standby coordinator's gang is made to the mirrors, which replay
+	 * as it does (gp_dtx_standby.c): each content's, up and in sync with its
+	 * primary, as the standby last replayed the coordinator's word of them.
+	 * A mirror that is not has not what its primary has committed, and a
+	 * content without one has nobody to ask.
+	 */
+	if (GpClusterStandbyDispatch())
+	{
+		for (int i = 0; i < nsegs; i++)
+		{
+			if (segs[i].dbid == 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						 errmsg("cannot dispatch from the standby coordinator: segment %d has no mirror", i),
+						 errdetail("A standby coordinator's queries are answered by the mirrors.")));
+			if (segs[i].status != 'u' || segs[i].mode != 's')
+				ereport(ERROR,
+						(errcode(ERRCODE_CONNECTION_FAILURE),
+						 errmsg("cannot dispatch from the standby coordinator: the mirror of segment %d is %s",
+								i, segs[i].status != 'u' ? "down" : "not in sync with its primary"),
+						 errdetail("A standby coordinator's queries are answered by the mirrors.")));
+		}
+	}
 
 	dbname = get_database_name(MyDatabaseId);
 	username = GetUserNameFromId(GetSessionUserId(), false);
@@ -1842,6 +1902,8 @@ gang_build_wes(GpGang *g)
 /*
  * Is a node the gang is connected to no longer its content's primary?  FTS
  * failed over from it: whatever it answers is no part of the cluster now.
+ * Or, of a hot standby coordinator's gang, no longer its content's mirror,
+ * up and in sync -- or the standby itself a standby no more.
  */
 static bool
 gang_lost_primary(GpGang *g)
@@ -1849,7 +1911,7 @@ gang_lost_primary(GpGang *g)
 	if (!GpClusterStale())
 		return false;
 	for (int i = 0; i < g->nconns; i++)
-		if (!GpClusterIsPrimaryNow(g->conns[i].seg->dbid))
+		if (!GpClusterIsGangNodeNow(g->conns[i].seg->dbid))
 			return true;
 	return false;
 }
@@ -2374,7 +2436,7 @@ gang_check_moved(GpGang *g)
 		GpSegmentConn *c = &g->conns[i];
 		char	   *who;
 
-		if (!c->busy || GpClusterIsPrimaryNow(c->seg->dbid))
+		if (!c->busy || GpClusterIsGangNodeNow(c->seg->dbid))
 			continue;
 		who = psprintf("seg%d %s:%d pid=%d", c->content, c->seg->hostname,
 					   c->seg->port, PQbackendPID(c->conn));
@@ -4140,6 +4202,8 @@ dtx_forget(void)
 	dtx_nprepared = 0;
 	dtx_all_prepared = false;
 	dtx_logged_before_commit = false;
+	dtx_committing = false;
+	dtx_one_phase = false;
 	dtx_gid[0] = '\0';
 	if (dtx_prepared != NULL)
 		memset(dtx_prepared, 0, dtx_prepared_size * sizeof(bool));
@@ -4338,13 +4402,29 @@ gang_commit_first_phase(GpGang *g)
 		gang_dtm_end(g);
 		notices_quiet--;
 		dtx_wait_for_depends(&g->conns[lone]);
+
+		/*
+		 * The segment's commit is the decision, and the coordinator's
+		 * commit record waits for nobody -- but where a commit is to return
+		 * only once the standby coordinator has applied it
+		 * (synchronous_commit = remote_apply): a query there is to see what
+		 * a client was told committed, and sees this transaction in
+		 * progress until the standby has its commit record.  Flushed then,
+		 * and waited for once it is written (dispatch_commit_recorded()).
+		 */
+		if (synchronous_commit >= SYNCHRONOUS_COMMIT_REMOTE_APPLY)
+		{
+			ForceSyncCommit();
+			dtx_one_phase = true;
+		}
 		return;
 	}
 
 	notices_quiet++;
 	if (nwriters > 0)
 	{
-		GpDtxFormGid(GpDtxGxid(), dtx_gid);
+		dtx_gxid = GpDtxGxid();
+		GpDtxFormGid(dtx_gxid, dtx_gid);
 		ForceSyncCommit();
 		if (dtx_prepared_size < g->nconns)
 		{
@@ -4407,6 +4487,17 @@ gang_commit_first_phase(GpGang *g)
 		 * prepared, and an error still aborts every one
 		 */
 		GP_FAULT("before_xlog_xact_distributed_commit");
+
+		/*
+		 * From here until every part has its second phase the transaction
+		 * is one a hot standby coordinator's queries see in progress, though
+		 * the standby has its commit record: the WAL says so now, before
+		 * that record, whose flush carries this (gp_dtx_standby.c).  Last of
+		 * what the first phase does: whatever fails after it and before the
+		 * commit record, the abort says the transaction is none.
+		 */
+		GpDtxCommitting(dtx_gxid);
+		dtx_committing = true;
 
 		/* what the commit record will find, or more (dtx_wait_for_standby()) */
 		dtx_logged_before_commit = XLogRecPtrIsValid(XactLastRecEnd);
@@ -4824,7 +4915,20 @@ gang_commit_second_phase(void)
 				(errmsg("the distributed transaction \"%s\" was committed, but %d of its segments have not been told yet",
 						dtx_gid, nfailed),
 				 errdetail("Distributed transaction recovery commits their parts.")));
+
+		/* ... and then says the transaction's second phase is done */
+		if (dtx_committing)
+			GpDtxAbandon(dtx_gxid);
 		GpDtxWakeRecovery();
+	}
+	else if (dtx_committing)
+	{
+		/*
+		 * Every part is committed: the transaction is in its second phase
+		 * no more, where Cloudberry writes its forget record (cdbtm.c) --
+		 * waited for on the standby where the commit itself was.
+		 */
+		GpDtxForget(dtx_gxid, true);
 	}
 	dtx_forget();
 }
@@ -4899,6 +5003,12 @@ dispatch_commit_recorded(TransactionId latestXid)
 		GP_FAULT("after_xlog_xact_distributed_commit");
 		dtx_wait_for_standby();
 		gang_commit_second_phase();
+	}
+	else if (dtx_one_phase)
+	{
+		/* see gang_commit_first_phase(); interrupts are held, as there */
+		dtx_one_phase = false;
+		SyncRepWaitForLSN(XactLastCommitEnd, true);
 	}
 
 	/*
@@ -5078,6 +5188,13 @@ dispatch_xact_callback(XactEvent event, void *arg)
 			forget_kept_errors();
 			gang_forget_settings();
 			gang_forget_snapshot();
+
+			/*
+			 * Its first phase had ended, and it did not commit: no
+			 * transaction in its second phase after all.
+			 */
+			if (dtx_committing)
+				GpDtxForget(dtx_gxid, false);
 			dtx_forget();
 			GpReportDtxForget();
 			streams_release();

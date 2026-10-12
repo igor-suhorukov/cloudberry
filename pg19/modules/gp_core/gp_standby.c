@@ -92,6 +92,7 @@
 #include "utils/wait_event.h"
 
 #include "gp_cluster.h"
+#include "gp_dtx_standby.h"
 #include "gp_fts.h"
 #include "gp_standby.h"
 
@@ -322,6 +323,7 @@ GpStandbyMain(Datum main_arg)
 {
 	int			written = -1;	/* what this process last set: 1 on, 0 off */
 	int			caught_up = 0;
+	int			logged_for = 0; /* the sender the commits were logged for */
 	MemoryContext loop_cxt;
 
 	pqsignal(SIGHUP, SignalHandlerForConfigReload);
@@ -357,6 +359,17 @@ GpStandbyMain(Datum main_arg)
 		}
 
 		want = standby_wanted(&caught_up, &unsettled);
+
+		/*
+		 * The distributed transactions in their second phase, logged whole
+		 * for a hot standby's queries (gp_dtx_standby.c): at once as a
+		 * standby's sender comes to stream or within range -- one that has
+		 * just started replays from before some of what it needs, and has
+		 * it whole from this -- and every so often while there is WAL.
+		 */
+		GpDtxLogRunning(want && caught_up != logged_for);
+		logged_for = want ? caught_up : 0;
+
 		if (written == -1 ? want != standby_names_set() : want != (written == 1))
 		{
 			MemoryContext old = MemoryContextSwitchTo(loop_cxt);
@@ -383,6 +396,10 @@ GpStandbyMain(Datum main_arg)
 			timeout_ms = 1000;
 		else
 			timeout_ms = 60000;
+
+		/* ... and no longer than the set of commits is logged apart */
+		if (XLogStandbyInfoActive())
+			timeout_ms = Min(timeout_ms, 15000);
 
 		(void) WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
 						 timeout_ms, standby_wait_event());

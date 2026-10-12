@@ -131,6 +131,19 @@ extern bool GpClusterStale(void);
 extern bool GpClusterIsPrimaryNow(int dbid);
 
 /*
+ * Does this backend dispatch as a hot standby coordinator -- to each
+ * content's mirror, where a coordinator's backend dispatches to its primary?
+ * Then the nodes GpClusterSegments() gives are the mirrors, as the standby
+ * last replayed their states; one that is down, or not in sync with its
+ * primary, is among them as it is, for the dispatcher to refuse.  And is
+ * the node of that dbid one a gang is made to now: GpClusterIsPrimaryNow()
+ * for a coordinator, and for a standby its content's mirror, up and in
+ * sync.
+ */
+extern bool GpClusterStandbyDispatch(void);
+extern bool GpClusterIsGangNodeNow(int dbid);
+
+/*
  * What FTS last published, whatever this backend adopted: each node's state,
  * in the order of GpClusterNodes(), and the number FTS bumps at each change.
  */
@@ -265,6 +278,9 @@ extern bool GpClusterIsDispatched(void);
 
 /* The identity the dispatcher gave it, "" when it has none. */
 extern const char *GpClusterQeIdentity(void);
+
+/* Is the dispatcher that gave it a hot standby coordinator's? */
+extern bool GpClusterDispatchedByStandby(void);
 
 /*
  * Is it the coordinator's own connection: dispatched, and carrying the

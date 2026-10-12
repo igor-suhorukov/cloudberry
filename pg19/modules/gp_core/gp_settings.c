@@ -137,6 +137,7 @@ static int	gp_vmem_idle_resource_timeout = 18000;
 static int	gp_segments_for_planner = 0;
 static bool gp_workfile_compression = false;
 static bool gp_enable_multiphase_agg = true;
+static bool gp_disable_tuple_hints = true;
 static bool gp_enable_multiphase_limit = true;
 static bool gp_eager_two_phase_agg = false;
 static bool gp_cte_sharing = false;
@@ -826,6 +827,12 @@ GpSettingsInit(void)
 							 "Accepted for Cloudberry's scripts: temporary files are PostgreSQL's own, which are not compressed.",
 							 &gp_workfile_compression,
 							 false, PGC_USERSET, 0,
+							 NULL, NULL, NULL);
+	DefineCustomBoolVariable("gp.disable_tuple_hints",
+							 "Specify if reader should set hint bits on tuples.",
+							 "Accepted for Cloudberry's scripts: a tuple's hint bits are PostgreSQL's to set, which logs none of them on a node in recovery.",
+							 &gp_disable_tuple_hints,
+							 true, PGC_USERSET, GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 	DefineCustomBoolVariable("gp.test_print_prefetch_joinqual",
 							 "For testing purposes, print information about if we prefetch join qual.",

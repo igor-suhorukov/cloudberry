@@ -130,6 +130,23 @@ AS 'MODULE_PATHNAME', 'gp_dtx_map'
 LANGUAGE C STRICT VOLATILE;
 
 /*
+ * The distributed transactions in their second phase, as this node has
+ * them -- a coordinator's own, each left to distributed transaction recovery
+ * or not; a standby coordinator's as its redo keeps them, which its queries
+ * see in progress still -- and whether the node has the set whole.  See
+ * gp_dtx_standby.c.
+ */
+CREATE FUNCTION gp_internal.dtx_committing(OUT gxid xid8, OUT abandoned bool)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'gp_dtx_committing'
+LANGUAGE C STRICT VOLATILE;
+
+CREATE FUNCTION gp_internal.dtx_committing_whole()
+RETURNS bool
+AS 'MODULE_PATHNAME', 'gp_dtx_committing_whole'
+LANGUAGE C STRICT VOLATILE;
+
+/*
  * The map as it is logged, in each database of a segment: a row for each
  * part of a distributed transaction that prepared here, or committed here in
  * one phase, written by the part itself -- so that it commits with it, and a
@@ -911,6 +928,25 @@ CREATE VIEW pg_catalog.gp_stat_activity AS
 RESET allow_system_table_mods;
 
 GRANT SELECT ON gp_internal.stat_activity, pg_catalog.gp_stat_activity TO PUBLIC;
+
+/*
+ * gp_stat_database_conflicts: pg_stat_database_conflicts of every node, as
+ * Cloudberry's view of that name gives it -- on a hot standby coordinator
+ * its own rows and each mirror's, which are the nodes that cancel a query
+ * for the sake of their recovery.
+ */
+SET allow_system_table_mods = on;
+CREATE VIEW pg_catalog.gp_stat_database_conflicts AS
+	SELECT -1 AS gp_segment_id, s.*
+	FROM pg_catalog.pg_stat_database_conflicts s
+	UNION ALL
+	SELECT d.gp_segment_id, d.datid, d.datname, d.confl_tablespace,
+		   d.confl_lock, d.confl_snapshot, d.confl_bufferpin,
+		   d.confl_deadlock, d.confl_active_logicalslot, d.stats_reset
+	FROM gp.dist_random(NULL::pg_catalog.pg_stat_database_conflicts) d;
+RESET allow_system_table_mods;
+
+GRANT SELECT ON pg_catalog.gp_stat_database_conflicts TO PUBLIC;
 
 /*
  * How a relation's rows are spread over the segments.

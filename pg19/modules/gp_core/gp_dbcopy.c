@@ -100,6 +100,7 @@
 #include "gp_dbcopy.h"
 #include "gp_dirxact.h"
 #include "gp_dtx.h"
+#include "gp_dtx_standby.h"
 #include "gp_extmark.h"
 #include "gp_fault.h"
 
@@ -709,6 +710,12 @@ dbcopy_redo(XLogReaderState *record)
 		GpDtxRedoGxid(XLogRecGetData(record), XLogRecGetDataLen(record));
 		return;
 	}
+	if (info == XLOG_GP_CORE_DTX_COMMITTING || info == XLOG_GP_CORE_DTX_FORGET ||
+		info == XLOG_GP_CORE_DTX_RUNNING)
+	{
+		GpDtxStandbyRedo(info, XLogRecGetData(record), XLogRecGetDataLen(record));
+		return;
+	}
 	if (info != XLOG_GP_CORE_DBCOPY)
 		elog(PANIC, "gp_core_redo: unknown op code %u", info);
 
@@ -764,6 +771,31 @@ dbcopy_desc(StringInfo buf, XLogReaderState *record)
 						 ahead);
 		return;
 	}
+	if ((XLogRecGetInfo(record) & ~XLR_INFO_MASK) == XLOG_GP_CORE_DTX_COMMITTING ||
+		(XLogRecGetInfo(record) & ~XLR_INFO_MASK) == XLOG_GP_CORE_DTX_FORGET)
+	{
+		uint64		gxid;
+
+		memcpy(&gxid, XLogRecGetData(record), sizeof(gxid));
+		appendStringInfo(buf, "distributed transaction " UINT64_FORMAT, gxid);
+		return;
+	}
+	if ((XLogRecGetInfo(record) & ~XLR_INFO_MASK) == XLOG_GP_CORE_DTX_RUNNING)
+	{
+		uint32		n;
+
+		memcpy(&n, XLogRecGetData(record), sizeof(n));
+		appendStringInfo(buf, "%u distributed transactions in their second phase:", n);
+		for (uint32 i = 0; i < n; i++)
+		{
+			uint64		gxid;
+
+			memcpy(&gxid, XLogRecGetData(record) + sizeof(n) + i * sizeof(gxid),
+				   sizeof(gxid));
+			appendStringInfo(buf, " " UINT64_FORMAT, gxid);
+		}
+		return;
+	}
 	memcpy(&rec, XLogRecGetData(record), sizeof(rec));
 	appendStringInfo(buf, "copy dir %u/%u/%s to %u/%u/%s",
 					 rec.src_spc, rec.src_db, name,
@@ -783,6 +815,12 @@ dbcopy_identify(uint8 info)
 		return "DIRXACT_END";
 	if ((info & ~XLR_INFO_MASK) == XLOG_GP_CORE_GXID)
 		return "GXID";
+	if ((info & ~XLR_INFO_MASK) == XLOG_GP_CORE_DTX_COMMITTING)
+		return "DTX_COMMITTING";
+	if ((info & ~XLR_INFO_MASK) == XLOG_GP_CORE_DTX_FORGET)
+		return "DTX_FORGET";
+	if ((info & ~XLR_INFO_MASK) == XLOG_GP_CORE_DTX_RUNNING)
+		return "DTX_RUNNING";
 	return NULL;
 }
 

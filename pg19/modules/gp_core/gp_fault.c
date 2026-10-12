@@ -114,7 +114,9 @@ static const char *const fault_type_names[] = {
  * to its next batch (ExecHashJoinNewBatch()), a temporary file just made
  * (BufFileCreateTemp()), and a write to one -- as its buffer is written out
  * (BufFileDumpBuffer()), once a block, where Cloudberry's asks at each
- * BufFileWrite().
+ * BufFileWrite().  The second of them is Cloudberry's after_open_temp_file
+ * as well, its fault as a temporary file has been opened (fd.c), which a
+ * test holds a mirror's query at while its tablespace is dropped.
  *
  * And the points of the tests' build that are Cloudberry's faults under
  * their own names, whose calls in Cloudberry say more than that they came:
@@ -124,7 +126,9 @@ static const char *const fault_type_names[] = {
  * checkpointer's loop, where a fault that held the checkpointer in a loop
  * has it checkpoint once let go (CheckpointerMain(), checkpointer.c); and an
  * insert into a table, which names the table, as a test's fault may
- * (heap_insert(), heapam.c).  The build's other points under Cloudberry's
+ * (heap_insert(), heapam.c), and so does a scan of a heap page whose lock
+ * it has let go and whose pin it holds (heap_prepare_pagescan(),
+ * test-iso2-standby.patch).  The build's other points under Cloudberry's
  * names -- a database's copy and its drop's replay, a tablespace's
  * directories, a PREPARE's record, the checkpointer's loop's end, and the
  * rest of isolation2's (test-iso2-*.patch) -- say only that they came, and
@@ -178,6 +182,7 @@ static const struct
 	{"exec_simple_query_start", "exec-simple-query-start", POINT_ARG_NONE},
 	{"exec_hashjoin_new_batch", "exec-hashjoin-new-batch", POINT_ARG_NONE},
 	{"workfile_creation_failure", "workfile-creation-failure", POINT_ARG_NONE},
+	{"after_open_temp_file", "workfile-creation-failure", POINT_ARG_NONE},
 	{"workfile_write_failure", "workfile-write-failure", POINT_ARG_NONE},
 	{"auto_vac_worker_before_do_autovacuum", "auto_vac_worker_before_do_autovacuum", POINT_ARG_NAMES},
 	{"vacuum_update_dat_frozen_xid", "vacuum_update_dat_frozen_xid", POINT_ARG_NAMES},
@@ -186,6 +191,7 @@ static const struct
 	{"start_insertedDistributedCommitted", "start_insertedDistributedCommitted", POINT_ARG_PREPARED},
 	{"keep_log_seg", "keep_log_seg", POINT_ARG_SKIP},
 	{"heap_insert", "heap_insert", POINT_ARG_NAMES},
+	{"heapgetpage_after_unlock_buffer", "heapgetpage_after_unlock_buffer", POINT_ARG_NAMES},
 	{"checkpoint_dtx_info", "checkpoint_after_redo_calculated", POINT_ARG_NONE},
 };
 

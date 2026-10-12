@@ -35,8 +35,10 @@
  * gp_dbcopy.c registers it; its records are a database's directory copied,
  * the nodes' states as the coordinator publishes them (gp_cluster.c), a
  * prepared part's file of what its directories are to become, written and
- * removed (gp_dirxact.c), and the transaction IDs the coordinator gives to
- * nobody again (gp_dtx.c).
+ * removed (gp_dirxact.c), the transaction IDs the coordinator gives to
+ * nobody again (gp_dtx.c), and the distributed transactions in their second
+ * phase, for a hot standby coordinator's queries: one that begins it, one
+ * forgotten, and all of them (gp_dtx_standby.c).
  */
 #define GP_CORE_RMGR_ID			197
 
@@ -45,6 +47,9 @@
 #define XLOG_GP_CORE_DIRXACT	0x20	/* a prepared part's file, written */
 #define XLOG_GP_CORE_DIRXACT_END	0x30	/* and removed */
 #define XLOG_GP_CORE_GXID		0x40	/* transaction IDs, given to nobody again */
+#define XLOG_GP_CORE_DTX_COMMITTING	0x50	/* a commit's second phase begins */
+#define XLOG_GP_CORE_DTX_FORGET	0x60	/* ... and is done, or never was */
+#define XLOG_GP_CORE_DTX_RUNNING	0x70	/* every commit in its second phase */
 
 /*
  * The rest of CREATE DATABASE, where a node runs createdb() itself (gp_ddl.c,

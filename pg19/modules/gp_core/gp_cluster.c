@@ -166,6 +166,12 @@ static GpSegmentConfig *cluster_segments = NULL;
 static int	cluster_nsegments = 0;
 static int	cluster_max_segments = 0;
 
+/*
+ * Or each content's mirror, in a backend of a hot standby coordinator's,
+ * which dispatches to them (GpClusterRefresh()).
+ */
+static bool cluster_segments_standby = false;
+
 /* gpexpand's version the number is of, and whether this backend took it. */
 static uint64 cluster_expand_version = 0;
 static bool cluster_counted = false;
@@ -416,10 +422,13 @@ cluster_parse_file(const char *path, GpSegmentConfig **nodes_out)
 		/*
 		 * The role the file gives is the node's preferred one, and the one it
 		 * has until FTS says otherwise; a primary and its mirror are not
-		 * known to be in sync until FTS has asked.
+		 * known to be in sync until FTS has asked.  FTS asks nothing of the
+		 * coordinator's standby, which Cloudberry's catalog lists in sync
+		 * from the moment it is added (gp_add_coordinator_standby(), and
+		 * gp_segadmin.c's): so is one the file lists.
 		 */
 		node->preferred_role = node->role;
-		node->mode = 'n';
+		node->mode = (node->content == -1 && node->role == 'm') ? 's' : 'n';
 		node->status = 'u';
 
 		field = next_field(&p);
@@ -1117,21 +1126,51 @@ cluster_adopt_nodes(void)
 	LWLockRelease(cluster_shared->lock);
 }
 
+/*
+ * Does this backend dispatch as a hot standby coordinator: to the mirrors,
+ * which replay as it does, what its own snapshot sees (gp_dtx_standby.c)?
+ * A backend of the standby coordinator's own, while the node is in
+ * recovery.
+ */
+bool
+GpClusterStandbyDispatch(void)
+{
+	return cluster_self != NULL && cluster_self->content == -1 &&
+		!GpClusterIsDispatched() && RecoveryInProgress();
+}
+
 bool
 GpClusterRefresh(void)
 {
 	uint64		version;
 	bool		changed = false;
 	bool		whole = true;
+	bool		standby;
+	char		role;
 
 	if (cluster_shared == NULL)
 		return false;
 
 	cluster_adopt_nodes();
 
+	/*
+	 * The nodes a gang is made to are each content's primary, and on a hot
+	 * standby coordinator its mirror: all of them again where the node has
+	 * been promoted since this backend last looked.
+	 */
+	standby = GpClusterStandbyDispatch();
+	role = standby ? 'm' : 'p';
+	if (standby != cluster_segments_standby && cluster_segments != NULL)
+	{
+		cluster_segments_standby = standby;
+		for (int content = 0; content < cluster_max_segments; content++)
+			memset(&cluster_segments[content], 0, sizeof(GpSegmentConfig));
+		changed = true;
+	}
+
 	SpinLockAcquire(&cluster_shared->mutex);
 	version = cluster_shared->version;
-	if (version != cluster_version)
+	if (version != cluster_version || changed)
 	{
 		for (int i = 0; i < cluster_nnodes; i++)
 		{
@@ -1148,18 +1187,26 @@ GpClusterRefresh(void)
 	}
 	SpinLockRelease(&cluster_shared->mutex);
 
-	if (version == cluster_version)
+	if (version == cluster_version && !changed)
 		return false;
 	if (whole)
 		cluster_version = version;
 
+	/*
+	 * A mirror's state is taken with it: a gang is made only to mirrors
+	 * that are up and in sync, and one made before a mirror stopped being
+	 * so is no gang now.
+	 */
 	for (int i = 0; i < cluster_nnodes; i++)
 	{
 		int			content = cluster[i].content;
 
-		if (content < 0 || content >= cluster_nsegments || cluster[i].role != 'p')
+		if (cluster[i].dbid == 0 || content < 0 ||
+			content >= cluster_nsegments || cluster[i].role != role)
 			continue;
-		if (cluster_segments[content].dbid != cluster[i].dbid)
+		if (cluster_segments[content].dbid != cluster[i].dbid ||
+			(standby && (cluster_segments[content].mode != cluster[i].mode ||
+						 cluster_segments[content].status != cluster[i].status)))
 			changed = true;
 		cluster_segments[content] = cluster[i];
 	}
@@ -1173,6 +1220,9 @@ GpClusterStale(void)
 
 	if (cluster_shared == NULL)
 		return false;
+	if (cluster_segments != NULL &&
+		cluster_segments_standby != GpClusterStandbyDispatch())
+		return true;
 	SpinLockAcquire(&cluster_shared->mutex);
 	version = cluster_shared->version;
 	SpinLockRelease(&cluster_shared->mutex);
@@ -1296,6 +1346,36 @@ GpClusterIsPrimaryNow(int dbid)
 	}
 	SpinLockRelease(&cluster_shared->mutex);
 	return primary;
+}
+
+/*
+ * Is the node of that dbid one a gang of this backend's is made to, as FTS
+ * last published -- its content's primary, and up; for a hot standby
+ * coordinator its content's mirror, up and in sync with its primary?
+ */
+bool
+GpClusterIsGangNodeNow(int dbid)
+{
+	bool		standby = GpClusterStandbyDispatch();
+	bool		is = false;
+
+	if (!standby)
+		return GpClusterIsPrimaryNow(dbid);
+	if (cluster_shared == NULL)
+		return true;
+
+	SpinLockAcquire(&cluster_shared->mutex);
+	for (int i = 0; i < cluster_nnodes; i++)
+	{
+		if (cluster_shared->nodes[i].dbid != dbid)
+			continue;
+		is = cluster_shared->nodes[i].role == 'm' &&
+			cluster_shared->nodes[i].status == 'u' &&
+			cluster_shared->nodes[i].mode == 's';
+		break;
+	}
+	SpinLockRelease(&cluster_shared->mutex);
+	return is;
 }
 
 uint64
@@ -1964,6 +2044,16 @@ bool
 GpClusterIsDispatched(void)
 {
 	return gp_qe_identity != NULL && gp_qe_identity[0] != '\0';
+}
+
+/*
+ * Was this backend dispatched to by a hot standby coordinator?  Its
+ * identity says so: "seg0/dbid8/sess42/nseg3/standby".
+ */
+bool
+GpClusterDispatchedByStandby(void)
+{
+	return strstr(GpClusterQeIdentity(), "/standby") != NULL;
 }
 
 const char *

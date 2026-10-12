@@ -475,6 +475,7 @@ modules = [
                      'modules/gp_core/gp_cluster.c',
                      'modules/gp_core/gp_dispatch.c',
                      'modules/gp_core/gp_dtx.c',
+                     'modules/gp_core/gp_dtx_standby.c',
                      'modules/gp_core/gp_fault.c',
                      'modules/gp_core/gp_dbcopy.c',
                      'modules/gp_core/gp_extmark.c',
