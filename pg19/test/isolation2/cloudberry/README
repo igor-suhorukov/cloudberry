@@ -591,3 +591,68 @@ udf_exception_blocks_panic_scenarios
   function's line as its context.  In each case the statement fails, the
   segment recovers and the table the function made is not there, as in
   Cloudberry's.
+
+
+Cloudberry's hot_standby_schedule, in the group mirrors_hot_standby:
+
+hot_standby/basic
+  Three things; the rest is Cloudberry's, the gang on the mirrors' ports
+  with it.  A commit one segment decides, in one phase, is seen on the
+  standby as it returns, where Cloudberry's standby sees it only after the
+  next commit in two phases: its standby learns that a distributed
+  transaction ended from the next distributed commit's record, and here
+  the transaction's ID is the coordinator's own, whose commit record the
+  standby replays -- and the INSERT returns once it has, under the test's
+  synchronous_commit = remote_apply (gang_commit_first_phase(),
+  gp_dispatch.c).  The session's processes after the join of hs_t1 and
+  hs_t2, and after the one with pg_class: the standby's backend and a
+  writer on each mirror, as after the first query, where Cloudberry's
+  lists a reader on each mirror too, and then an entry-db reader.  ORCA
+  declines both joins, whose condition compares whole rows, and the
+  planner's plan gathers each table through its segment's one connection
+  and joins them on the standby, as in the greenplum suite's
+  gp_backend_info.  And the header of SHOW optimizer, which is
+  gp.optimizer's.
+
+hot_standby/transaction_isolation
+  The bytes of an append-optimized table's segment files and nothing else,
+  eof and eofuncompressed in gp_toolkit.__gp_aoseg(): gp_ao's block of the
+  same rows is longer than Cloudberry's, by 16 or 24 bytes, as in
+  uao_crash_compaction_row.  The standby's answer is the coordinator's
+  each time, which is what the test asks of it.
+
+hot_standby/query_conflict
+  In both passes, the last case's count of a heap table's deleted rows
+  under gp_select_invisible, on the coordinator: 0, where Cloudberry's
+  counts the 10 its VACUUM left.  gp.select_invisible is gp_ao's, of an
+  append-optimized table's rows; a heap's scan here is PostgreSQL's, which
+  shows no deleted row.  The rows are there -- the standby's transaction,
+  begun before the DELETE, goes on counting them, and is cancelled only by
+  the VACUUM after the coordinator's open transaction has ended, as in
+  Cloudberry's.
+  In the planner's pass besides, the conflict with a temporary tablespace
+  dropped under a query: none, the query answered and no conflict counted.
+  The test holds the mirror of segment 1 where it has just made a
+  temporary file (after_open_temp_file) while the tablespace is dropped.
+  ORCA's plan joins on the segments, and its mirror's file is there to be
+  held; the planner's gathers both sides and joins them on the standby,
+  whose temporary files the fault on a mirror does not hold, and the query
+  is over before the DROP.
+
+hot_standby/faults
+  The words of two errors, each of a query on the standby after a node of
+  content 1 has failed.  The mirror stopped, and FTS has marked it down:
+  "cannot dispatch from the standby coordinator: the mirror of segment 1
+  is down", where Cloudberry's session, whose gang is as it was, fails on
+  the broken connection, "Error on receive from seg1".  And the primary
+  stopped, the mirror promoted: the same words, of the node that is the
+  mirror now, where Cloudberry's session sends its statement to the
+  promoted mirror, which refuses it, "primary segments can only process
+  MPP protocol messages from primary QD".  The standby here replays the
+  coordinator's word of its nodes (GpClusterRedo()), and a session's next
+  transaction takes it, as a coordinator's does: its gang is let go, and
+  none is made to a mirror that is down or not in sync.  A mirror reached
+  before that word refuses as Cloudberry's does, in those words
+  (port/hot_standby/committing asks it).  Every query that succeeds in
+  Cloudberry's succeeds, and the transaction the coordinator failed in the
+  second phase of stays hidden until its recovery has finished it.

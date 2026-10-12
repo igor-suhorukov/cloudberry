@@ -1,0 +1,17 @@
+@@
+-DETAIL:  User was or might have been using tablespace that must be dropped.
+-ERROR:  canceling statement due to conflict with recovery
++ xx 
++----
++ 1  
++ 2  
++ 3  
++ 4  
++ 5  
++(5 rows)
+@@
+- t        
++ f        
+@@
+- 10    
++ 0     

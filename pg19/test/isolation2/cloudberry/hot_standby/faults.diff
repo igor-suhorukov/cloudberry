@@ -1,0 +1,11 @@
+@@
+-ERROR:  Error on receive from seg1 : server closed the connection unexpectedly
+-	This probably means the server terminated abnormally
+-	before or while processing the request.
++DETAIL:  A standby coordinator's queries are answered by the mirrors.
++ERROR:  cannot dispatch from the standby coordinator: the mirror of segment 1 is down
+@@
+-ERROR:  primary segments can only process MPP protocol messages from primary QD
+-HINT:  Exit the current session and re-connect.
++DETAIL:  A standby coordinator's queries are answered by the mirrors.
++ERROR:  cannot dispatch from the standby coordinator: the mirror of segment 1 is down

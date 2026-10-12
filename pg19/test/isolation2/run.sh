@@ -29,7 +29,8 @@
 # retrieve sessions that read them (1R:, *R:).  And
 # isolation2_crash_schedule: a segment or the coordinator failed inside a
 # VACUUM, a distributed transaction's commit, a subtransaction or DROP
-# DATABASE, and what its recovery leaves.
+# DATABASE, and what its recovery leaves.  And hot_standby_schedule: queries
+# on the standby coordinator, which the mirrors answer.
 #
 # src/test/isolation2 is Cloudberry's suite of tests that need more than one
 # session at a time, written in its isolation2 syntax (1: ..., 2&: ..., 2<:,
@@ -623,12 +624,28 @@ run_group() {
 		PORTS="$ports" perl -pe 'BEGIN { %p = map { split /=/ } split / /, $ENV{PORTS} }
 			s/(pg_isready\b[^;&|]*?\s-p\s+)(\d+)\b/$1 . ($p{$2} \/\/ $2)/ge'
 	}
+	# ... and the other way about in a test's result, where it lists the
+	# session's processes with gp_backend_info(): a row's port there is the
+	# demo cluster's node's of that place, as the expected output has it.
+	demo_ports() {
+		local c ports="$(node_port "$gi" 0)=7000 $(standby_port "$gi")=7001"
+		for c in 0 1 2; do
+			ports="$ports $(node_port "$gi" $((c + 1)))=$((7002 + c)) $(mirror_port "$gi" "$c")=$((7005 + c))"
+		done
+		PORTS="$ports" perl -pi -e 'BEGIN { %p = map { split /=/ } split / /, $ENV{PORTS} }
+			s/^(\s*-?\d+\s*\|\s*[A-Za-z]\s*\|\s*-?\d+\s*\|\s*)(\d+)(\s*)$/$1 . ($p{$2} \/\/ $2) . $3/e' "$1"
+	}
 	: > "$R/status"
-	"$PSQL" -X -q -d postgres -c "DROP DATABASE IF EXISTS $DBNAME" > /dev/null 2>&1
-	"$PSQL" -X -q -d postgres -c "CREATE DATABASE $DBNAME TEMPLATE template0" > /dev/null
+	# The database the group's tests run in: the schedule's, and for the
+	# group of hot_standby_schedule's tests the one Cloudberry's Makefile
+	# runs that schedule in, whose name they look their own conflicts up by.
+	local dbname="$DBNAME"
+	[[ "$g" == *hot_standby ]] && dbname=isolation2-hot-standby
+	"$PSQL" -X -q -d postgres -c "DROP DATABASE IF EXISTS \"$dbname\"" > /dev/null 2>&1
+	"$PSQL" -X -q -d postgres -c "CREATE DATABASE \"$dbname\" TEMPLATE template0" > /dev/null
 	if ! out=$({ sed -e "s#@BINDIR@#$BINDIR#g" "$HERE/setup.sql"
 			     [ -z "$SETUP_MORE" ] || cat "$SETUP_MORE"; } |
-			   "$PSQL" -X -q -v ON_ERROR_STOP=1 -d "$DBNAME" -f - 2>&1); then
+			   "$PSQL" -X -q -v ON_ERROR_STOP=1 -d "$dbname" -f - 2>&1); then
 		echo "  the setup failed in group $g:" > "$R/setup-failed"
 		printf '%s\n' "$out" | sed 's/^/    /' >> "$R/setup-failed"
 		return 1
@@ -697,9 +714,10 @@ run_group() {
 		t0=$(date +%s%N)
 		( cd "$CB" && PGOPTIONS="-c gp.optimizer=$optimizer" \
 			timeout "${ISOLATION2_TEST_TIMEOUT:-600}" python3 "$EXEC/sql_isolation_testcase.py" \
-				--dbname="$DBNAME" --initfile_prefix="$res" \
+				--dbname="$dbname" --initfile_prefix="$res" \
 				< "$R/sql/$t.sql" > "$res" 2>&1 )
 		ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+		grep -q 'gp_backend_info()' "$R/sql/$t.sql" && demo_ports "$res"
 
 		# The port's first: what it takes off a segment's error -- which
 		# segment -- leaves the lines Cloudberry's init files mask.

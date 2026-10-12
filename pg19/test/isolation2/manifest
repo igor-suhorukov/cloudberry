@@ -72,7 +72,8 @@
 # crash recovery in mirrors7, and pg_rewind_fail_missing_xlog in mirrors8,
 # which sets wal_keep_size and wal_recycle, restarts the cluster, and fails
 # two contents over and recovers them twice each.  And Cloudberry's
-# isolation2_crash_schedule, at the end of this file, in mirrors9.
+# isolation2_crash_schedule, at the end of this file, in mirrors9, and its
+# hot_standby_schedule after it, in mirrors_hot_standby.
 skip gpdispatch                             gp_cte_sharing, Cloudberry's planner's sharing of a CTE (the test turns ORCA off): its ShareInputScan on segment 0, whose writer the fault shareinput_writer_notifyready holds, the port's planner route has not (Route B); it waits for the fault
 run  check_gxid                                         crash
 run  checkpoint_dtx_info                                crash
@@ -407,3 +408,31 @@ run  port/frozen_insert_crash                           mirrors9
 run  dropdb_crash_hazards                               mirrors9
 skip prevent_ao_wal                         that an append-optimized table writes no WAL at wal_level = minimal, where Cloudberry, which writes and syncs such a table's files itself, logs them for its mirrors alone: gp_ao's pages are the buffer manager's and a crash is recovered from their records, so they are written there as a heap's are (the ao suite, section 19); and pg_waldump knows gp_ao's records by their resource manager's ID, where the test asks for "appendonly"
 run  packcore                                           mirrors9
+#
+# And Cloudberry's hot_standby_schedule, queries on the standby coordinator,
+# dispatched to the mirrors (gp_dtx_standby.c), in a group of its own,
+# mirrors_hot_standby, and in that schedule's order: its first test makes
+# every node's commits wait until the standby has applied them
+# (synchronous_commit = remote_apply) and restarts the cluster, and its last
+# puts that back.  The group's database is the one Cloudberry's Makefile
+# runs the schedule in, isolation2-hot-standby, which the tests look their
+# conflicts with recovery up by (run.sh).  What a query there sees of a
+# transaction in each phase of its commit, of one that aborted and of one a
+# segment refused; under READ COMMITTED and REPEATABLE READ, across
+# savepoints, and after the standby has restarted; PostgreSQL's conflicts
+# with recovery, on the standby and on the mirrors, and their counters; a
+# mirror down, a mirror promoted, and the pair back; and a transaction the
+# coordinator failed in the second phase of, which the standby hides until
+# distributed transaction recovery has finished it.  Beside them
+# port/hot_standby/committing, the port's own: the set of transactions in
+# their second phase as each node has it, a mirror that has a part
+# committed which the standby's query does not see, a transaction block of
+# the standby's across a commit, the standby's own catalog, a second phase
+# its backend leaves to recovery, and a commit in one phase.
+run  hot_standby/setup                                  mirrors_hot_standby
+run  hot_standby/basic                                  mirrors_hot_standby
+run  hot_standby/transaction_isolation                  mirrors_hot_standby
+run  hot_standby/query_conflict                         mirrors_hot_standby
+run  hot_standby/faults                                 mirrors_hot_standby
+run  port/hot_standby/committing                        mirrors_hot_standby
+run  hot_standby/teardown                               mirrors_hot_standby

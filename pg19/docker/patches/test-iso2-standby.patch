@@ -1,0 +1,84 @@
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied.  See the License for the
+specific language governing permissions and limitations
+under the License.
+
+Injection points for the port's tests, under the names of three of Apache
+Cloudberry's faults inside PostgreSQL's own scan, recovery and promotion,
+which query_conflict and faults in its hot-standby schedule of isolation2
+set on a mirror: a scan of a heap page held once the page's lock is let go
+and its pin still held, in the table the test names, so that the replay of
+a VACUUM of the page waits for the pin; the startup process having
+signalled the backends that may hold the pin it waits for, which the test
+waits for before it lets the scan go; and a promotion come as far as the
+node no longer being in recovery, which a test waits for after FTS has
+promoted a mirror:
+
+  heapgetpage_after_unlock_buffer          heapam.c, heap_prepare_pagescan()
+  recovery_conflict_bufferpin_signal_sent  standby.c, SendRecoveryConflictWithBufferPin()
+  out_of_recovery_in_startupxlog           xlog.c, StartupXLOG()
+
+gp_core's fault injector attaches a fault of Cloudberry's name to the point
+(gp_fault.c), the first with the table's name, as heap_insert's.  They serve
+tests alone, so they are not in the core series: Dockerfile.pg applies this
+after test-iso2-recovery.patch, to the tree of either ref, vanilla or
+patched, so that the two images still differ only in the ref.  Dormant, as
+any point is: without injection points the macro is empty, and with them a
+point nothing attached to runs no callback.
+
+
+--- a/src/backend/access/heap/heapam.c
++++ b/src/backend/access/heap/heapam.c
+@@ -699,6 +699,16 @@
+ 	}
+ 
+ 	LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
++
++	/*
++	 * A test may hold a scan here, the page's lock let go and its pin held,
++	 * the point's callback given the table's name.
++	 */
++	{
++		const char *names[2] = {"", RelationGetRelationName(scan->rs_base.rs_rd)};
++
++		INJECTION_POINT("heapgetpage_after_unlock_buffer", (void *) names);
++	}
+ }
+ 
+ /*
+--- a/src/backend/access/transam/xlog.c
++++ b/src/backend/access/transam/xlog.c
+@@ -6189,6 +6189,9 @@
+ 	 */
+ 	InRecovery = false;
+ 
++	/* A test may wait for a promotion to have come this far, here. */
++	INJECTION_POINT("out_of_recovery_in_startupxlog", NULL);
++
+ 	/* start the archive_timeout timer and LSN running */
+ 	XLogCtl->lastSegSwitchTime = (pg_time_t) time(NULL);
+ 	XLogCtl->lastSegSwitchLSN = EndOfLog;
+--- a/src/backend/storage/ipc/standby.c
++++ b/src/backend/storage/ipc/standby.c
+@@ -888,6 +888,9 @@
+ 	 * own fate.
+ 	 */
+ 	SignalRecoveryConflictWithDatabase(InvalidOid, reason);
++
++	/* A test may wait until the backends have been signalled, here. */
++	INJECTION_POINT("recovery_conflict_bufferpin_signal_sent", NULL);
+ }
+ 
+ /*
