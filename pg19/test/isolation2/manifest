@@ -324,6 +324,7 @@ run  segwalrep/cancel_commit_pending_replication   mirrors3
 run  segwalrep/twophase_tolerance_with_mirror_promotion  mirrors1
 run  segwalrep/dtm_recovery_on_standby             mirrors4
 run  segwalrep/commit_blocking_on_standby          mirrors4
+run  port/commit_blocking_on_standby_dml           mirrors4
 run  segwalrep/dtx_recovery_wait_lsn               mirrors5
 skip segwalrep/select_throttle                     wait_for_replication_threshold, Cloudberry's throttling of a backend's WAL until the mirror has it, and gp_disable_tuple_hints, which PostgreSQL does not have
 run  terminate_in_gang_creation                         mirrors2

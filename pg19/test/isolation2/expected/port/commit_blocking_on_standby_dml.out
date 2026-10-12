@@ -1,0 +1,145 @@
+-- The port's own, beside segwalrep/commit_blocking_on_standby, whose commits
+-- are a CREATE TABLE's: the commit of an INSERT, an UPDATE or a DELETE of a
+-- distributed table alone waits for the standby coordinator too.  Such a
+-- transaction logs nothing on the coordinator but its commit record, and
+-- PostgreSQL waits for synchronous replication with a commit record only
+-- where the transaction had logged something before it; so the coordinator
+-- waits between the two phases of the commit (gp_dispatch.c,
+-- dtx_wait_for_standby()), as Cloudberry's waits for every commit that
+-- prepared.  Without that the statement returned while the standby had not
+-- flushed the record that committed it, and a standby promoted then could
+-- lack a commit the client had been told of.
+
+SELECT application_name, state FROM pg_stat_replication;
+ application_name | state     
+------------------+-----------
+ gp_walreceiver   | streaming 
+(1 row)
+
+-- A table for each session: an UPDATE's lock on a table waits for an
+-- INSERT's, which is held to the end of its commit.
+CREATE TABLE commit_blocking_dml_i (a int, b int) DISTRIBUTED BY (a);
+CREATE
+CREATE TABLE commit_blocking_dml_u (a int, b int) DISTRIBUTED BY (a);
+CREATE
+INSERT INTO commit_blocking_dml_u SELECT i, i % 2 FROM generate_series(1, 40) i;
+INSERT 40
+
+-- Until n backends of this node wait for synchronous replication.
+CREATE FUNCTION commit_blocking_dml_wait(n int) RETURNS bool AS $$ BEGIN	/* in func */ FOR i IN 1..600 LOOP	/* in func */ IF (SELECT count(*) FROM pg_stat_activity WHERE wait_event = 'SyncRep') >= n THEN	/* in func */ RETURN true;	/* in func */ END IF;	/* in func */ PERFORM pg_sleep(0.1);	/* in func */ PERFORM pg_stat_clear_snapshot();	/* in func */ END LOOP;	/* in func */ RETURN false;	/* in func */ END;	/* in func */ $$ LANGUAGE plpgsql;
+CREATE
+
+-- A session's first statements log more than a commit record on the
+-- coordinator, and such a commit PostgreSQL waits for of itself.  The two
+-- sessions have theirs behind them: each has run what it runs below.
+1: INSERT INTO commit_blocking_dml_i SELECT i, 1 FROM generate_series(1, 20) i;
+INSERT 20
+1: INSERT INTO commit_blocking_dml_i SELECT i, 1 FROM generate_series(1, 20) i;
+INSERT 20
+2: BEGIN;
+BEGIN
+2: UPDATE commit_blocking_dml_u SET b = 0 WHERE b = 0;
+UPDATE 20
+2: DELETE FROM commit_blocking_dml_u WHERE b = 1 AND a > 40;
+DELETE 0
+2: COMMIT;
+COMMIT
+2: BEGIN;
+BEGIN
+2: UPDATE commit_blocking_dml_u SET b = 0 WHERE b = 0;
+UPDATE 20
+2: DELETE FROM commit_blocking_dml_u WHERE b = 1 AND a > 40;
+DELETE 0
+2: COMMIT;
+COMMIT
+
+-- The standby stops flushing what it receives, and a checkpoint's record
+-- has it reach the fault.
+SELECT gp_inject_fault_infinite('walrecv_skip_flush', 'skip', dbid) FROM gp_segment_configuration WHERE content = -1 AND role = 'm';
+ gp_inject_fault_infinite 
+--------------------------
+ Success:                 
+(1 row)
+CHECKPOINT;
+CHECKPOINT
+SELECT gp_wait_until_triggered_fault('walrecv_skip_flush', 1, dbid) FROM gp_segment_configuration WHERE content = -1 AND role = 'm';
+ gp_wait_until_triggered_fault 
+-------------------------------
+ Success:                      
+(1 row)
+
+-- An INSERT into every segment commits in two phases, and waits.
+1&: INSERT INTO commit_blocking_dml_i SELECT i, 2 FROM generate_series(1, 20) i;  <waiting ...>
+SELECT commit_blocking_dml_wait(1);
+ commit_blocking_dml_wait 
+--------------------------
+ t                        
+(1 row)
+
+-- And the COMMIT of an UPDATE and a DELETE.
+2: BEGIN;
+BEGIN
+2: UPDATE commit_blocking_dml_u SET b = 3 WHERE b = 0;
+UPDATE 20
+2: DELETE FROM commit_blocking_dml_u WHERE b = 1 AND a <= 20;
+DELETE 10
+2&: COMMIT;  <waiting ...>
+SELECT commit_blocking_dml_wait(2);
+ commit_blocking_dml_wait 
+--------------------------
+ t                        
+(1 row)
+
+SELECT wait_event, query FROM pg_stat_activity WHERE wait_event = 'SyncRep' ORDER BY query;
+ wait_event | query                                                                        
+------------+------------------------------------------------------------------------------
+ SyncRep    | COMMIT;                                                                      
+ SyncRep    | INSERT INTO commit_blocking_dml_i SELECT i, 2 FROM generate_series(1, 20) i; 
+(2 rows)
+
+-- Neither has committed for another session: no segment has been told to.
+SELECT b, count(*) FROM commit_blocking_dml_i GROUP BY b ORDER BY b;
+ b | count 
+---+-------
+ 1 | 40    
+(1 row)
+SELECT b, count(*) FROM commit_blocking_dml_u GROUP BY b ORDER BY b;
+ b | count 
+---+-------
+ 0 | 20    
+ 1 | 20    
+(2 rows)
+
+-- The standby flushes again, with the next record it receives.
+SELECT gp_inject_fault('walrecv_skip_flush', 'reset', dbid) FROM gp_segment_configuration WHERE content = -1 AND role = 'm';
+ gp_inject_fault 
+-----------------
+ Success:        
+(1 row)
+CHECKPOINT;
+CHECKPOINT
+
+1<:  <... completed>
+INSERT 20
+2<:  <... completed>
+COMMIT
+
+SELECT b, count(*) FROM commit_blocking_dml_i GROUP BY b ORDER BY b;
+ b | count 
+---+-------
+ 1 | 40    
+ 2 | 20    
+(2 rows)
+SELECT b, count(*) FROM commit_blocking_dml_u GROUP BY b ORDER BY b;
+ b | count 
+---+-------
+ 1 | 10    
+ 3 | 20    
+(2 rows)
+
+DROP TABLE commit_blocking_dml_i;
+DROP
+DROP TABLE commit_blocking_dml_u;
+DROP
+DROP FUNCTION commit_blocking_dml_wait(int);
+DROP

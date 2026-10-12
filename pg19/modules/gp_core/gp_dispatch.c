@@ -80,6 +80,7 @@
 #include "access/table.h"
 #include "access/transam.h"
 #include "access/xact.h"
+#include "access/xlog.h"
 #include "catalog/catalog.h"
 #include "catalog/objectaddress.h"
 #include "commands/seclabel.h"
@@ -102,6 +103,7 @@
 #include "parser/scanner.h"
 #include "portability/instr_time.h"
 #include "postmaster/postmaster.h"
+#include "replication/syncrep.h"
 #include "replication/walsender.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
@@ -768,6 +770,13 @@ static bool *dtx_prepared = NULL;	/* by connection, in TopMemoryContext */
 static int	dtx_prepared_size = 0;
 static int	dtx_nprepared = 0;
 static bool dtx_all_prepared = false;
+
+/*
+ * Had the transaction logged anything of its own when its parts were
+ * prepared?  PostgreSQL then waits for the standby with its commit record;
+ * otherwise the second phase does (dtx_wait_for_standby()).
+ */
+static bool dtx_logged_before_commit = false;
 
 /* Names the cursors of the gathers of one transaction apart. */
 static uint32 gather_counter = 0;
@@ -4130,6 +4139,7 @@ dtx_forget(void)
 {
 	dtx_nprepared = 0;
 	dtx_all_prepared = false;
+	dtx_logged_before_commit = false;
 	dtx_gid[0] = '\0';
 	if (dtx_prepared != NULL)
 		memset(dtx_prepared, 0, dtx_prepared_size * sizeof(bool));
@@ -4397,6 +4407,9 @@ gang_commit_first_phase(GpGang *g)
 		 * prepared, and an error still aborts every one
 		 */
 		GP_FAULT("before_xlog_xact_distributed_commit");
+
+		/* what the commit record will find, or more (dtx_wait_for_standby()) */
+		dtx_logged_before_commit = XLogRecPtrIsValid(XactLastRecEnd);
 	}
 }
 
@@ -4737,6 +4750,44 @@ gang_finish_prepared(bool commit)
 }
 
 /*
+ * Between the phases: the commit record that decides the transaction is on
+ * the coordinator's disk, and the standby coordinator is to have it before a
+ * segment is told to commit -- and so before the client is told anything.
+ * PostgreSQL waits for synchronous replication with a commit record only
+ * where the transaction had logged something before it
+ * (RecordTransactionCommit(), wrote_xlog), since a transaction that logged
+ * nothing has changed nothing of the node's.  The coordinator's transaction
+ * for an INSERT, UPDATE or DELETE of distributed tables alone is such a one,
+ * its commit record all it writes, and that record commits every part on
+ * the segments: unreplicated, a standby promoted would lack a commit the
+ * client was told of, whose parts the segments had committed or still held
+ * prepared.  Cloudberry waits for every commit that prepared (isDtxPrepared,
+ * in its RecordTransactionCommit()).
+ *
+ * Not where PostgreSQL has waited already: the standby then has the record,
+ * or the wait was cancelled, and is not to begin again.  What the
+ * transaction had logged was looked at as the first phase ended; where
+ * something was logged only after that, PostgreSQL has waited too, and this
+ * returns at once, the standby having the record, unless that wait was
+ * cancelled.  A cancel or a
+ * termination ends this wait as it ends PostgreSQL's, with its warning, and
+ * the second phase goes on: the commit stands either way.  No wait at all
+ * where the commit asks for none (synchronous_commit), or while no standby
+ * is waited for (gp_standby.c).  Interrupts are held here, as
+ * SyncRepWaitForLSN() expects of a commit.
+ *
+ * A transaction one segment commits in one phase does not come here: its
+ * commit is that segment's, which waits for the segment's mirror.
+ */
+static void
+dtx_wait_for_standby(void)
+{
+	if (dtx_logged_before_commit)
+		return;
+	SyncRepWaitForLSN(XactLastCommitEnd, true);
+}
+
+/*
  * The second phase, at COMMIT: the coordinator's commit record is on disk,
  * and nothing may be raised.  What a segment was not told, the recovery
  * process commits by the same record; this says so, and wakes it.
@@ -4846,6 +4897,7 @@ dispatch_commit_recorded(TransactionId latestXid)
 		 * (checkpoint_dtx_info).
 		 */
 		GP_FAULT("after_xlog_xact_distributed_commit");
+		dtx_wait_for_standby();
 		gang_commit_second_phase();
 	}
 

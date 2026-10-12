@@ -674,8 +674,11 @@ tools:
 - the coordinator waits for its standby as Cloudberry's does: while the
   standby, connected as `gp_walreceiver`, streams, or has caught up within
   `gp.repl_catchup_within_range` WAL segments, and not otherwise
-  (`gp_standby.c`); on a segment the setting says when FTS turns a
-  primary's synchronous replication back on;
+  (`gp_standby.c`) -- the commit of a transaction that wrote on the
+  segments alone too, between its two phases, whose record on the
+  coordinator is all the coordinator logs of it (`gp_dispatch.c`); on a
+  segment the setting says when FTS turns a primary's synchronous
+  replication back on;
 - Cloudberry's segment administration functions change the cluster's
   nodes while it runs — `gp_add_segment()`, `gp_remove_segment()`,
   `gp_add_segment_mirror()`, `gp_remove_segment_mirror()`,
