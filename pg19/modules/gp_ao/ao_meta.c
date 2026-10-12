@@ -624,6 +624,7 @@ struct AoBlkdirScan
 	Snapshot	snapshot;
 	SysScanDesc scan;
 	ScanKeyData key[2];
+	bool		placeholders;	/* given too, nrows -1 */
 };
 
 AoBlkdirScan *
@@ -643,7 +644,33 @@ ao_blkdir_scan_begin(int64 storage_id, int segno, Snapshot snapshot)
 	return bs;
 }
 
-/* The next row, placeholders passed over; false at the end. */
+/*
+ * Every version of every directory row gp_ao.blkdir still holds of
+ * storage_id, by segment file and first row: a dead one's as well as the
+ * live one's, an uncommitted one's, and a placeholder's, which comes with
+ * nrows -1 -- what Cloudberry's __gp_aoblkdir() reads of its block directory
+ * relation under SnapshotAny, with gp_select_invisible.
+ */
+AoBlkdirScan *
+ao_blkdir_scan_begin_any(int64 storage_id)
+{
+	AoBlkdirScan *bs = palloc0_object(AoBlkdirScan);
+
+	bs->rel = table_open(meta_relid("blkdir", storage_id, false), AccessShareLock);
+	bs->idx = index_open(meta_relid("blkdir_key", storage_id, false), AccessShareLock);
+	ScanKeyInit(&bs->key[0], Anum_blkdir_storage_id, BTEqualStrategyNumber,
+				F_INT8EQ, Int64GetDatum(storage_id));
+	bs->snapshot = SnapshotAny;
+	bs->placeholders = true;
+	bs->scan = systable_beginscan_ordered(bs->rel, bs->idx, bs->snapshot, 1,
+										  bs->key);
+	return bs;
+}
+
+/*
+ * The next row, placeholders passed over but in a scan of every version;
+ * false at the end.
+ */
 bool
 ao_blkdir_scan_next(AoBlkdirScan *bs, AoBlkdirEntry *entry)
 {
@@ -659,7 +686,7 @@ ao_blkdir_scan_next(AoBlkdirScan *bs, AoBlkdirEntry *entry)
 		entry->segno = DatumGetInt32(values[Anum_blkdir_segno - 1]);
 		entry->first_row = DatumGetInt64(values[Anum_blkdir_first_row - 1]);
 		entry->nrows = DatumGetInt32(values[Anum_blkdir_nrows - 1]);
-		if (entry->nrows < 0)
+		if (entry->nrows < 0 && !bs->placeholders)
 			continue;
 		entry->offsets = int8_array_values(values[Anum_blkdir_offsets - 1],
 										   &entry->noffsets);

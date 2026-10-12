@@ -613,10 +613,49 @@ gp_ao_aovisimap_entry(PG_FUNCTION_ARGS)
 	return (Datum) 0;
 }
 
+/* A directory row as __gp_aoblkdir() gives it: a row for each file's block. */
+static void
+put_blkdir_entry(ReturnSetInfo *rsinfo, const AoBlkdirEntry *entry)
+{
+	Datum		values[7];
+	bool		nulls[7] = {0};
+
+	values[0] = ItemPointerGetDatum(&entry->tid);
+	values[1] = Int32GetDatum(entry->segno);
+	values[3] = Int32GetDatum(0);
+	values[4] = Int64GetDatum(entry->first_row);
+	if (entry->nrows < 0)
+	{
+		/*
+		 * A placeholder, of the block a writer is building: no file's block
+		 * yet, and every row number from its first, as a unique index's
+		 * probe takes it (ao_blkdir_insert_placeholder()).
+		 */
+		values[2] = Int32GetDatum(0);
+		values[5] = Int64GetDatum(0);
+		values[6] = Int64GetDatum(AO_MAX_ROWNUM - entry->first_row + 1);
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+		return;
+	}
+	for (int g = 0; g < entry->noffsets; g++)
+	{
+		if (entry->offsets[g] < 0)
+			continue;
+		values[2] = Int32GetDatum(g);
+		values[5] = Int64GetDatum(entry->offsets[g]);
+		values[6] = Int64GetDatum(entry->nrows);
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+}
+
 /*
  * __gp_aoblkdir(regclass): the block directory, a row for each block of
  * rows in each file -- a column group of Cloudberry's is a column here, and
- * each directory row has one entry.
+ * each directory row has one entry.  With gp.select_invisible every version
+ * of every row the directory still holds, as Cloudberry's reads its block
+ * directory relation under SnapshotAny: a row a transaction in progress
+ * wrote, one a later version replaced, and the placeholder of a block being
+ * built for a table that has a unique index.
  */
 Datum
 gp_ao_aoblkdir(PG_FUNCTION_ARGS)
@@ -625,38 +664,30 @@ gp_ao_aoblkdir(PG_FUNCTION_ARGS)
 	Relation	rel;
 	int64		storage_id;
 	AoSegfile  *segfiles;
+	AoBlkdirEntry entry;
 	int			n;
 
 	InitMaterializedSRF(fcinfo, 0);
 	rel = open_ao(PG_GETARG_OID(0), AO_WANT_BLKDIR);
 	storage_id = ao_storage_id(rel);
+	if (gp_select_invisible)
+	{
+		AoBlkdirScan *bs = ao_blkdir_scan_begin_any(storage_id);
+
+		while (ao_blkdir_scan_next(bs, &entry))
+			put_blkdir_entry(rsinfo, &entry);
+		ao_blkdir_scan_end(bs);
+		relation_close(rel, AccessShareLock);
+		return (Datum) 0;
+	}
 	segfiles = ao_segfiles_read(storage_id, GetLatestSnapshot(), &n);
 	for (int i = 0; i < n; i++)
 	{
 		AoBlkdirScan *bs = ao_blkdir_scan_begin(storage_id, segfiles[i].segno,
 												GetLatestSnapshot());
-		AoBlkdirEntry entry;
 
 		while (ao_blkdir_scan_next(bs, &entry))
-		{
-			for (int g = 0; g < entry.noffsets; g++)
-			{
-				Datum		values[7];
-				bool		nulls[7] = {0};
-
-				if (entry.offsets[g] < 0)
-					continue;
-				values[0] = ItemPointerGetDatum(&entry.tid);
-				values[1] = Int32GetDatum(entry.segno);
-				values[2] = Int32GetDatum(g);
-				values[3] = Int32GetDatum(0);
-				values[4] = Int64GetDatum(entry.first_row);
-				values[5] = Int64GetDatum(entry.offsets[g]);
-				values[6] = Int64GetDatum(entry.nrows);
-				tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
-									 values, nulls);
-			}
-		}
+			put_blkdir_entry(rsinfo, &entry);
 		ao_blkdir_scan_end(bs);
 	}
 	relation_close(rel, AccessShareLock);

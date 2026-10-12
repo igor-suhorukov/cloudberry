@@ -105,6 +105,23 @@ int			gp_appendonly_compaction_threshold = 10;
 bool		gp_appendonly_compaction = true;
 
 /*
+ * Cloudberry's gp_appendonly_compaction_segfile_limit: how many of a table's
+ * segment files a VACUUM leaves for inserts, compacting no more once fewer
+ * would be left (ao_vacuum.c).
+ */
+int			gp_appendonly_compaction_segfile_limit = 10;
+
+/*
+ * Cloudberry's Debug_appendonly_print_compaction, ..._segfile_choice and
+ * ..._visimap: a segment's log says what VACUUM compacts and recycles, which
+ * segment file a writer takes, and what a statement writes to the visibility
+ * map.
+ */
+bool		gp_debug_appendonly_print_compaction = false;
+bool		gp_debug_appendonly_print_segfile_choice = false;
+bool		gp_debug_appendonly_print_visimap = false;
+
+/*
  * Cloudberry's gp_appendonly_insert_files and ..._tuples_range: how many
  * segment files an insert spreads its rows over, and how many rows go to one
  * before the next (ao_dml.c).
@@ -1602,6 +1619,37 @@ _PG_init(void)
 							 &gp_appendonly_compaction,
 							 true,
 							 PGC_USERSET, 0,
+							 NULL, NULL, NULL);
+	DefineCustomIntVariable("gp.appendonly_compaction_segfile_limit",
+							"Sets the minimum number of segfiles that must always be available for inserts",
+							"Cloudberry calls this gp_appendonly_compaction_segfile_limit: if the "
+							"number of available segfiles for insert falls below this limit, "
+							"compaction will be avoided, to avoid too many segments going into "
+							"AWAITING_DROP.",
+							&gp_appendonly_compaction_segfile_limit,
+							10, 0, 127,
+							PGC_USERSET, 0,
+							NULL, NULL, NULL);
+	DefineCustomBoolVariable("gp.debug_appendonly_print_compaction",
+							 "Print log messages about append-only visibility compactions.",
+							 "Cloudberry calls this debug_appendonly_print_compaction.",
+							 &gp_debug_appendonly_print_compaction,
+							 false,
+							 PGC_SUSET, GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	DefineCustomBoolVariable("gp.debug_appendonly_print_segfile_choice",
+							 "Print log messages for append-only writers about their choice for AO segment file.",
+							 "Cloudberry calls this debug_appendonly_print_segfile_choice.",
+							 &gp_debug_appendonly_print_segfile_choice,
+							 false,
+							 PGC_SUSET, GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	DefineCustomBoolVariable("gp.debug_appendonly_print_visimap",
+							 "Print log messages for append-only visibility bitmap information.",
+							 "Cloudberry calls this debug_appendonly_print_visimap.",
+							 &gp_debug_appendonly_print_visimap,
+							 false,
+							 PGC_SUSET, GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 	DefineCustomIntVariable("gp.predicate_pushdown_sample_rows",
 							"Max sample rows during predicate pushdown.",

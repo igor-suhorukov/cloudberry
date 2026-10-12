@@ -239,13 +239,28 @@ segfile_fewer_rows(const void *a, const void *b)
 	return (x->segno > y->segno) - (x->segno < y->segno);
 }
 
-/* Is the writer being made VACUUM's, compacting into it? */
+/*
+ * Is the writer being made VACUUM's, compacting into it?  And the segment
+ * file it compacts, which its rows must not go back to.  Such a writer may
+ * find no file to take, every other being another transaction's or awaiting
+ * drop, and VACUUM then leaves the file as it is (ao_insert_state() NULL),
+ * where a statement that has rows to store fails.
+ */
 static bool ao_compaction_writer = false;
+static int	ao_compaction_avoid = 0;
 
 void
-ao_dml_set_compaction_writer(bool on)
+ao_dml_set_compaction_writer(bool on, int avoid_segno)
 {
 	ao_compaction_writer = on;
+	ao_compaction_avoid = on ? avoid_segno : 0;
+}
+
+/* The segment file a writer appends to. */
+int
+ao_insert_segno(AoInsertState *st)
+{
+	return st->segno;
 }
 
 /* A new segment file for st, whose number no one else is taking. */
@@ -276,9 +291,10 @@ ao_new_segfile(AoInsertState *st, const bool *taken)
  * choose_segno_internal() prefers, or a new one.  VACUUM's writer, which
  * compacts, takes a new one before one with rows, as Cloudberry's
  * CHOOSE_MODE_COMPACTION_WRITE does: rows moved into a file that has rows
- * already would be moved again when that file is compacted.
+ * already would be moved again when that file is compacted.  False where
+ * there is none to take, for VACUUM's writer; anyone else's fails.
  */
-static void
+static bool
 ao_choose_segfile(AoInsertState *st, Relation rel)
 {
 	AoSegfile  *segfiles;
@@ -292,12 +308,18 @@ ao_choose_segfile(AoInsertState *st, Relation rel)
 	{
 		AoHeldSegno *h = lfirst(lc);
 
-		if (h->relid == st->relid && !ao_segno_in_use(st->relid, h->segno))
+		if (h->relid == st->relid && !ao_segno_in_use(st->relid, h->segno) &&
+			h->segno != ao_compaction_avoid)
 		{
 			st->segno = h->segno;
 			st->sf = ao_segfile_read(st->storage_id, h->segno, SnapshotSelf);
 			if (st->sf != NULL && st->sf->state == AO_SEGFILE_DEFAULT)
-				return;
+			{
+				elog(AO_PRINT_LEVEL(gp_debug_appendonly_print_segfile_choice),
+					 "chose segment file %d of \"%s\" because this transaction holds it already",
+					 st->segno, RelationGetRelationName(rel));
+				return true;
+			}
 		}
 	}
 
@@ -314,7 +336,8 @@ ao_choose_segfile(AoInsertState *st, Relation rel)
 		AoSegfile  *sf = byrows[i];
 
 		if (sf->state != AO_SEGFILE_DEFAULT ||
-			ao_segno_in_use(st->relid, sf->segno))
+			ao_segno_in_use(st->relid, sf->segno) ||
+			sf->segno == ao_compaction_avoid)
 			continue;
 		if (ao_compaction_writer && sf->tupcount > 0 && !tried_new)
 		{
@@ -335,6 +358,8 @@ ao_choose_segfile(AoInsertState *st, Relation rel)
 	if (!tried_new && ao_new_segfile(st, taken))
 		goto chosen;
 
+	if (ao_compaction_writer)
+		return false;
 	ereport(ERROR,
 			(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
 			 errmsg("could not find segment file to use for inserting into relation \"%s\"",
@@ -353,6 +378,11 @@ chosen:
 		ao_held_segnos = lappend(ao_held_segnos, h);
 		MemoryContextSwitchTo(old);
 	}
+	elog(AO_PRINT_LEVEL(gp_debug_appendonly_print_segfile_choice),
+		 "chose segment file %d of \"%s\" for %s: " INT64_FORMAT " rows",
+		 st->segno, RelationGetRelationName(rel),
+		 ao_compaction_writer ? "compaction" : "write", st->sf->tupcount);
+	return true;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -425,7 +455,10 @@ ao_insert_files(Relation rel)
 	return made_here ? 1 : gp_appendonly_insert_files;
 }
 
-/* A writer of rel, on a segment file of its own. */
+/*
+ * A writer of rel, on a segment file of its own; NULL where it is VACUUM's
+ * and there is no file for it.
+ */
 static AoInsertState *
 ao_insert_begin(Relation rel, void *owner, SubTransactionId subid)
 {
@@ -456,7 +489,11 @@ ao_insert_begin(Relation rel, void *owner, SubTransactionId subid)
 		st->colopts = palloc_array(AoOptions, st->natts);
 		ao_column_options(rel, st->colopts);
 	}
-	ao_choose_segfile(st, rel);
+	if (!ao_choose_segfile(st, rel))
+	{
+		MemoryContextSwitchTo(old);
+		return NULL;
+	}
 	st->has_unique = ao_has_unique_index(rel);
 	ItemPointerSetInvalid(&st->placeholder);
 	if (st->sf->ngroups < st->ngroups)
@@ -477,7 +514,10 @@ ao_insert_begin(Relation rel, void *owner, SubTransactionId subid)
 	return st;
 }
 
-/* The running query's writer of rel to append to now, begun if it has none. */
+/*
+ * The running query's writer of rel to append to now, begun if it has none;
+ * NULL where VACUUM's has no segment file to take.
+ */
 AoInsertState *
 ao_insert_state(Relation rel)
 {
@@ -490,6 +530,8 @@ ao_insert_state(Relation rel)
 		MemoryContext old;
 
 		lead = ao_insert_begin(rel, owner, subid);
+		if (lead == NULL)
+			return NULL;
 		lead->nfiles = ao_insert_files(rel);
 		old = MemoryContextSwitchTo(ao_dml_context());
 		lead->files = list_make1(lead);
@@ -587,6 +629,14 @@ ao_flush_block(AoInsertState *st, Relation rel)
 	st->blocks++;
 	st->unseen = true;
 	st->block_nrows = 0;
+
+	/*
+	 * Cloudberry's fault as a minipage of its block directory, full, has
+	 * been written and the directory goes on to its next
+	 * (insert_new_entry()): here a block's directory row is written, and the
+	 * writer goes on to its next block.
+	 */
+	(void) AO_FAULT("insert_new_entry_curr_minipage_full", rel);
 }
 
 /* Append the row in slot, and give the slot its TID. */
@@ -597,7 +647,6 @@ ao_insert_slot(AoInsertState *st, Relation rel, TupleTableSlot *slot)
 	MemoryContext old = MemoryContextSwitchTo(ao_dml_context());
 	Size		blocksize;
 
-	(void) AO_FAULT("appendonly_insert", rel);
 	slot_getallattrs(slot);
 
 	if (st->next_rownum == st->reserved_end)
@@ -623,6 +672,13 @@ ao_insert_slot(AoInsertState *st, Relation rel, TupleTableSlot *slot)
 			CommandCounterIncrement();
 		}
 	}
+
+	/*
+	 * Cloudberry's fault as a row is about to be appended
+	 * (appendonly_insert()): once the block it goes to has its placeholder,
+	 * as Cloudberry's insert has had its own since it began.
+	 */
+	(void) AO_FAULT("appendonly_insert", rel);
 
 	if (st->columnar)
 	{
@@ -1059,11 +1115,34 @@ int64_cmp(const void *a, const void *b)
 }
 
 /*
- * Write a statement's deletions to the visibility map, and count each
- * segment file they touched as modified, as Cloudberry's modcount counts a
- * DELETE for an incremental backup to find: after the writers' own updates
- * of the rows, which the same statement's UPDATE may have made.  Not
- * counted ("count" false) where the statement appended rows to the table
+ * Count a statement that deleted rows of a table, and appended none, in the
+ * modcount of one of its segment files, as Cloudberry counts a DELETE for an
+ * incremental backup to find (AORelIncrementModCount()): not in each file
+ * it deleted from, but once, in the file a writer of this transaction would
+ * take -- one it holds already, or of those no one else holds the one with
+ * the fewest rows, or a new one -- which the transaction holds from here on,
+ * as a writer's is held.
+ */
+static void
+ao_count_delete(AoDeleteState *ds)
+{
+	Relation	rel = table_open(ds->relid, NoLock);
+	AoInsertState st = {0};
+
+	st.relid = ds->relid;
+	st.storage_id = ds->storage_id;
+	st.ngroups = ao_storage_is_columnar(rel) ? RelationGetDescr(rel)->natts : 1;
+	(void) ao_choose_segfile(&st, rel);
+	st.sf->modcount++;
+	ao_segfile_update(ds->storage_id, st.sf);
+	table_close(rel, NoLock);
+}
+
+/*
+ * Write a statement's deletions to the visibility map, and count the
+ * statement in the table's modcount (ao_count_delete()): after the writers'
+ * own updates of the rows, which the same statement's UPDATE may have made.
+ * Not counted ("count" false) where the statement appended rows to the table
  * too, an UPDATE, whose writer counted it already: once a statement, as
  * Cloudberry counts one (appendonly_dml_finish()).
  */
@@ -1073,22 +1152,18 @@ ao_finish_delete(AoDeleteState *ds, bool count)
 	CommandCounterIncrement();
 	for (int segno = 1; segno <= AO_MAX_SEGNO; segno++)
 	{
-		AoSegfile  *sf;
-
 		if (ds->n[segno] == 0)
 			continue;
 		qsort(ds->rownums[segno], ds->n[segno], sizeof(int64), int64_cmp);
 		ao_visimap_delete_rows(ds->storage_id, segno, ds->rownums[segno],
 							   ds->n[segno]);
-		if (!count)
-			continue;
-		sf = ao_segfile_read(ds->storage_id, segno, SnapshotSelf);
-		if (sf != NULL)
-		{
-			sf->modcount++;
-			ao_segfile_update(ds->storage_id, sf);
-		}
+		elog(AO_PRINT_LEVEL(gp_debug_appendonly_print_visimap),
+			 "visibility map of segment file %d of relation %u: %d rows deleted, " INT64_FORMAT " to " INT64_FORMAT,
+			 segno, ds->relid, ds->n[segno], ds->rownums[segno][0],
+			 ds->rownums[segno][ds->n[segno] - 1]);
 	}
+	if (count)
+		ao_count_delete(ds);
 
 	/* no longer listed, and read no more */
 	if (ds->ranges != NULL)

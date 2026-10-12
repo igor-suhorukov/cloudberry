@@ -148,6 +148,10 @@ ao_reader_read(Relation rel, AoBlockReader *rd, uint64 offset,
 	rd->loaded_filenum = rd->filenum;
 	rd->offset = offset;
 	rd->next = offset + AO_BLOCK_HEADER_SIZE + hdr.stored_len;
+	if (rd->bytes_read != NULL)
+		*rd->bytes_read += AO_BLOCK_HEADER_SIZE + hdr.stored_len;
+	/* Cloudberry's fault as a block has been read, the table's or any's */
+	(void) AO_FAULT("AppendOnlyStorageRead_ReadNextBlock_success", rel);
 }
 
 /*
@@ -551,6 +555,7 @@ ao_scan_begin(Relation rel, Snapshot snapshot, int nkeys, ScanKeyData *key,
 	if (flags & SO_ALLOW_STRAT)
 		scan->strategy = GetAccessStrategy(BAS_BULKREAD);
 	ao_reader_init(&scan->row, cxt);
+	scan->row.bytes_read = &scan->bytes_read;
 	if (scan->columnar)
 	{
 		scan->cols = palloc_array(AoBlockReader, scan->natts);
@@ -558,6 +563,7 @@ ao_scan_begin(Relation rel, Snapshot snapshot, int nkeys, ScanKeyData *key,
 		for (int i = 0; i < scan->natts; i++)
 		{
 			ao_reader_init(&scan->cols[i], cxt);
+			scan->cols[i].bytes_read = &scan->bytes_read;
 			scan->needed[i] = !TupleDescAttr(RelationGetDescr(rel), i)->attisdropped;
 		}
 	}
@@ -811,6 +817,7 @@ ao_scan_rescan(TableScanDesc sscan, ScanKeyData *key, bool set_params,
 	ao_scan_close_segfile(scan);
 	scan->cursf = -1;
 	scan->started = false;
+	scan->bytes_read = 0;
 	scan->sample_total = -1;
 	scan->sample_next = 0;
 	scan->sample_done = false;
@@ -1487,9 +1494,43 @@ ao_scan_analyze_next_tuple(TableScanDesc scan, double *liverows,
 }
 
 /*
+ * The bytes a scan of the whole table reads: the lengths of the files of
+ * the segment files it does not pass by, every column's of a table by
+ * column.
+ */
+static uint64
+ao_scan_total_bytes(AoScanDesc scan)
+{
+	uint64		total = 0;
+
+	if (!scan->started)
+		ao_scan_start(scan);
+	for (int i = 0; i < scan->nsegfiles; i++)
+	{
+		AoSegfile  *sf = &scan->segfiles[i];
+
+		if (sf->state == AO_SEGFILE_AWAITING_DROP || sf->tupcount == 0)
+			continue;
+		for (int g = 0; g < sf->ngroups; g++)
+			total += sf->eof[g];
+	}
+	return total;
+}
+
+/* As many blocks as bytes are, PostgreSQL's measure of a scan's progress. */
+#define AoBlocksOfBytes(bytes)	((int64) (((bytes) + BLCKSZ - 1) / BLCKSZ))
+
+/*
  * The rows of an index's build: every row the latest snapshot sees, in row
  * order, those of blocks start_blockno to start_blockno + numblocks - 1 of
  * their TIDs where BRIN asks for a range.
+ *
+ * Its progress, where it is asked to report it, is Cloudberry's for an
+ * append-optimized table (appendonly_index_build_range_scan()): the blocks
+ * to scan are what the files it reads hold, in blocks of BLCKSZ, and the
+ * blocks scanned what it has read of them -- pg_stat_progress_create_index's
+ * blocks_total and blocks_done, which gp_stat_progress_create_index gathers
+ * from the segments.
  */
 static double
 ao_index_build_range_scan(Relation table_rel, Relation index_rel,
@@ -1509,6 +1550,8 @@ ao_index_build_range_scan(Relation table_rel, Relation index_rel,
 	Snapshot	snapshot = NULL;
 	bool		own_scan = (scan == NULL);
 	uint64		end_blockno = (uint64) start_blockno + numblocks;
+	int64		blocks_total = 0;
+	int64		blocks_done = 0;
 
 	econtext->ecxt_scantuple = slot;
 	predicate = ExecPrepareQual(index_info->ii_Predicate, estate);
@@ -1518,12 +1561,30 @@ ao_index_build_range_scan(Relation table_rel, Relation index_rel,
 		snapshot = RegisterSnapshot(GetLatestSnapshot());
 		scan = table_beginscan(table_rel, snapshot, 0, NULL, SO_NONE);
 	}
+	/* a scan in parallel is several processes', none of which reports */
+	if (scan->rs_parallel != NULL)
+		progress = false;
+	if (progress)
+	{
+		blocks_total = AoBlocksOfBytes(ao_scan_total_bytes((AoScanDesc) scan));
+		pgstat_progress_update_param(PROGRESS_SCAN_BLOCKS_TOTAL, blocks_total);
+	}
 
 	while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
 	{
 		BlockNumber blk = ItemPointerGetBlockNumber(&slot->tts_tid);
 
 		CHECK_FOR_INTERRUPTS();
+		if (progress)
+		{
+			int64		done = AoBlocksOfBytes(((AoScanDesc) scan)->bytes_read);
+
+			if (done != blocks_done)
+			{
+				blocks_done = done;
+				pgstat_progress_update_param(PROGRESS_SCAN_BLOCKS_DONE, blocks_done);
+			}
+		}
 		if (numblocks != InvalidBlockNumber &&
 			(blk < start_blockno || (uint64) blk >= end_blockno))
 			continue;
@@ -1538,6 +1599,9 @@ ao_index_build_range_scan(Relation table_rel, Relation index_rel,
 		callback(index_rel, &slot->tts_tid, values, isnull, true,
 				 callback_state);
 	}
+
+	if (progress)
+		pgstat_progress_update_param(PROGRESS_SCAN_BLOCKS_DONE, blocks_total);
 
 	/* A scan given, a parallel build's, is ours to end too, as heap's is. */
 	table_endscan(scan);

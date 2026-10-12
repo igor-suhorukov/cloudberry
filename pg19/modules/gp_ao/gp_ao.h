@@ -306,6 +306,7 @@ extern void ao_blkdir_replace(ItemPointer tid, int64 storage_id, int segno,
 typedef struct AoBlkdirScan AoBlkdirScan;
 extern AoBlkdirScan *ao_blkdir_scan_begin(int64 storage_id, int segno,
 										  Snapshot snapshot);
+extern AoBlkdirScan *ao_blkdir_scan_begin_any(int64 storage_id);
 extern bool ao_blkdir_scan_next(AoBlkdirScan *bs, AoBlkdirEntry *entry);
 extern void ao_blkdir_scan_end(AoBlkdirScan *bs);
 
@@ -368,7 +369,8 @@ typedef struct AoInsertState AoInsertState;
 extern bool ao_has_unique_index(Relation rel);
 extern AoInsertState *ao_insert_state(Relation rel);
 extern AoInsertState *ao_insert_turn(AoInsertState *st, Relation rel);
-extern void ao_dml_set_compaction_writer(bool on);
+extern void ao_dml_set_compaction_writer(bool on, int avoid_segno);
+extern int	ao_insert_segno(AoInsertState *st);
 extern void ao_insert_slot(AoInsertState *st, Relation rel,
 						   TupleTableSlot *slot);
 extern void ao_insert_batch(Relation rel, const struct VexecColumn *columns,
@@ -441,7 +443,18 @@ extern PGDLLIMPORT int gp_appendonly_compaction_threshold;
 extern PGDLLIMPORT int gp_appendonly_insert_files;
 extern PGDLLIMPORT int gp_appendonly_insert_files_tuples_range;
 extern PGDLLIMPORT bool gp_appendonly_compaction;
+extern PGDLLIMPORT int gp_appendonly_compaction_segfile_limit;
 extern PGDLLIMPORT bool gp_select_invisible;
+extern PGDLLIMPORT bool gp_debug_appendonly_print_compaction;
+extern PGDLLIMPORT bool gp_debug_appendonly_print_segfile_choice;
+extern PGDLLIMPORT bool gp_debug_appendonly_print_visimap;
+
+/*
+ * What Cloudberry's Debug_appendonly_print_* settings have a segment write
+ * to its log: at LOG where the setting is on, and for a developer's
+ * log_min_messages where it is off.
+ */
+#define AO_PRINT_LEVEL(setting)	((setting) ? LOG : DEBUG2)
 
 /* The bitmap index (bitmap/), which gp_ao carries, as Cloudberry's is built in. */
 extern void bm_init(void);
@@ -469,6 +482,7 @@ typedef struct AoBlockReader
 {
 	MemoryContext cxt;			/* what its buffers are allocated in */
 	uint32		filenum;
+	uint64	   *bytes_read;		/* where a scan counts what it read, or NULL */
 	bool		loaded;
 	uint32		loaded_filenum;	/* of the loaded block */
 	uint64		offset;			/* of the loaded block */
@@ -531,6 +545,8 @@ typedef struct AoScanDescData
 	bool	   *needed;
 	/* the one segment file to read, for VACUUM; 0 for all */
 	int			only_segno;
+	/* the bytes of its files' blocks read so far, for an index build's progress */
+	uint64		bytes_read;
 	/* TABLESAMPLE: a row is a block, numbered as the scan reaches it */
 	int64		sample_total;	/* rows the segment files hold; -1 unknown */
 	int64		sample_next;	/* the number of the row the scan reads next */

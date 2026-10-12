@@ -50,6 +50,15 @@
  * drop meanwhile, as Cloudberry's does while a distributed snapshot is older
  * than its compaction.
  *
+ * A VACUUM compacts no file once fewer of the table's 127 than
+ * gp.appendonly_compaction_segfile_limit would be left for inserts -- those
+ * the table does not have yet, and those it has that are in use and that
+ * this VACUUM neither compacted nor moved rows into -- as Cloudberry's
+ * stops (ChooseSegnoForCompaction()): a file compacted awaits its drop for
+ * as long as an older snapshot is held, and a table all of whose files did
+ * would take no insert.  And it leaves a file there is no other to move the
+ * rows of into, with Cloudberry's warning.
+ *
  * A VACUUM changes no segment file's modcount, Cloudberry's count of the
  * statements that changed a file's rows, by which an incremental backup
  * tells a table that changed: neither the file compacted, nor the file its
@@ -213,6 +222,9 @@ ao_recycle(Relation rel, int64 storage_id, BufferAccessStrategy bstrategy)
 		rs.recycle[sf->segno] = true;
 		rs.boundary[sf->segno] = ao_next_rownum(rel, sf->segno);
 		n++;
+		elog(AO_PRINT_LEVEL(gp_debug_appendonly_print_compaction),
+			 "recycling segment file %d of \"%s\", compacted by transaction %u",
+			 sf->segno, RelationGetRelationName(rel), sf->compacted_by);
 	}
 	if (n == 0)
 		return 0;
@@ -277,9 +289,11 @@ ao_index_moved_row(Relation *indrels, IndexInfo **indinfos, ExprState **preds,
 
 /*
  * Compact segment file sf of rel: its live rows appended elsewhere, with
- * index entries of their own, and it marked awaiting drop.
+ * index entries of their own, and it marked awaiting drop.  Returns the
+ * segment file they went to, or 0 where there was none to take and sf is
+ * left as it was.
  */
-static void
+static int
 ao_compact(Relation rel, int64 storage_id, AoSegfile *sf)
 {
 	Snapshot	snapshot = RegisterSnapshot(GetLatestSnapshot());
@@ -292,16 +306,51 @@ ao_compact(Relation rel, int64 storage_id, AoSegfile *sf)
 	IndexInfo **indinfos;
 	ExprState **preds;
 	int			nindexes;
-	EState	   *estate = CreateExecutorState();
+	EState	   *estate;
 	int64		moved = 0;
+	int			target;
 
-	/* Awaiting drop now, so that the writer below takes another. */
+	elog(AO_PRINT_LEVEL(gp_debug_appendonly_print_compaction),
+		 "compacting segment file %d of \"%s\": " INT64_FORMAT " rows",
+		 sf->segno, RelationGetRelationName(rel), sf->tupcount);
+
+	/*
+	 * The file its rows go to, any but itself, taken before any is found to
+	 * move, as Cloudberry's is (AppendOnlyCompact()): a file whose rows are
+	 * all deleted leaves an empty one beside it.  The one an earlier file of
+	 * this VACUUM went to, where there is one.
+	 */
+	ao_dml_set_compaction_writer(true, sf->segno);
+	PG_TRY();
+	{
+		st = ao_insert_state(rel);
+	}
+	PG_FINALLY();
+	{
+		ao_dml_set_compaction_writer(false, 0);
+	}
+	PG_END_TRY();
+	if (st == NULL)
+	{
+		UnregisterSnapshot(snapshot);
+		ereport(WARNING,
+				(errmsg("could not find a free segment file to use for compacting segfile %d of relation %s",
+						sf->segno, RelationGetRelationName(rel))));
+		return 0;
+	}
+	target = ao_insert_segno(st);
+
+	/*
+	 * Awaiting drop from here on -- to every snapshot but the one its rows
+	 * are read with below, taken before.
+	 */
 	mine = ao_segfile_read(storage_id, sf->segno, SnapshotSelf);
 	mine->state = AO_SEGFILE_AWAITING_DROP;
 	mine->compacted_by = GetCurrentTransactionId();
 	ao_segfile_update(storage_id, mine);
 	CommandCounterIncrement();
 
+	estate = CreateExecutorState();
 	vac_open_indexes(rel, RowExclusiveLock, &nindexes, &indrels);
 	indinfos = palloc_array(IndexInfo *, Max(nindexes, 1));
 	preds = palloc_array(ExprState *, Max(nindexes, 1));
@@ -311,23 +360,6 @@ ao_compact(Relation rel, int64 storage_id, AoSegfile *sf)
 		preds[i] = indinfos[i]->ii_Predicate != NIL ?
 			ExecPrepareQual(indinfos[i]->ii_Predicate, estate) : NULL;
 	}
-
-	/*
-	 * The file its rows go to, taken before any is found to move, as
-	 * Cloudberry's is (AppendOnlyCompact()): a file whose rows are all
-	 * deleted leaves an empty one beside it.  The one an earlier file of
-	 * this VACUUM went to, where there is one.
-	 */
-	ao_dml_set_compaction_writer(true);
-	PG_TRY();
-	{
-		st = ao_insert_state(rel);
-	}
-	PG_FINALLY();
-	{
-		ao_dml_set_compaction_writer(false);
-	}
-	PG_END_TRY();
 
 	src = table_slot_create(rel, NULL);
 	dst = table_slot_create(rel, NULL);
@@ -354,8 +386,9 @@ ao_compact(Relation rel, int64 storage_id, AoSegfile *sf)
 
 	ao_dml_flush(RelationGetRelid(rel));
 	(void) AO_FAULT("vacuum_ao_after_compact", rel);
-	elog(DEBUG1, "compacted segment file %d of \"%s\": " INT64_FORMAT " rows moved",
-		 sf->segno, RelationGetRelationName(rel), moved);
+	elog(gp_debug_appendonly_print_compaction ? LOG : DEBUG1,
+		 "compacted segment file %d of \"%s\": " INT64_FORMAT " rows moved to segment file %d",
+		 sf->segno, RelationGetRelationName(rel), moved, target);
 
 	if (!list_member_oid(ao_compacted, RelationGetRelid(rel)))
 	{
@@ -364,6 +397,28 @@ ao_compact(Relation rel, int64 storage_id, AoSegfile *sf)
 		ao_compacted = lappend_oid(ao_compacted, RelationGetRelid(rel));
 		MemoryContextSwitchTo(old);
 	}
+	return target;
+}
+
+/*
+ * How many of the table's segment files are for inserts, were this VACUUM
+ * to go on: those the table has not, and those it has that are in use, but
+ * for the ones this VACUUM compacted or moved rows into ("touched").
+ */
+static int
+ao_files_for_inserts(const AoSegfile *segfiles, int nsegfiles,
+					 const bool *touched)
+{
+	bool		unavailable[AO_MAX_SEGNO + 1] = {0};
+	int			n = 0;
+
+	for (int i = 0; i < nsegfiles; i++)
+		if (segfiles[i].state != AO_SEGFILE_DEFAULT)
+			unavailable[segfiles[i].segno] = true;
+	for (int segno = 1; segno <= AO_MAX_SEGNO; segno++)
+		if (!unavailable[segno] && !touched[segno])
+			n++;
+	return n;
 }
 
 /*
@@ -398,6 +453,7 @@ ao_vacuum_rel(Relation rel, const VacuumParams *params,
 	double		livetuples;
 	double		deadtuples;
 	bool		compacted = false;
+	bool		touched[AO_MAX_SEGNO + 1] = {0};
 	TimestampTz starttime = GetCurrentTimestamp();
 
 	ao_vacuum_unhide();
@@ -413,17 +469,33 @@ ao_vacuum_rel(Relation rel, const VacuumParams *params,
 		AoSegfile  *sf = &segfiles[i];
 		AoVisimap  *vm;
 		int64		deleted;
+		int			available;
+		int			target;
 
-		if (sf->state != AO_SEGFILE_DEFAULT || sf->tupcount == 0)
+		/* Not the file an earlier one's rows went to, either. */
+		if (sf->state != AO_SEGFILE_DEFAULT || sf->tupcount == 0 ||
+			touched[sf->segno])
 			continue;
 		vm = ao_visimap_load(storage_id, sf->segno, GetLatestSnapshot());
 		deleted = ao_visimap_count(vm);
 		if (deleted == 0 ||
 			deleted * 100 < (int64) gp_appendonly_compaction_threshold * sf->tupcount)
 			continue;
+		available = ao_files_for_inserts(segfiles, nsegfiles, touched);
+		if (available < gp_appendonly_compaction_segfile_limit)
+		{
+			ereport(AO_PRINT_LEVEL(gp_debug_appendonly_print_segfile_choice),
+					(errmsg("number of available segfiles for inserts is below gp.appendonly_compaction_segfile_limit"),
+					 errdetail("available segfile count = %d, limit = %d",
+							   available, gp_appendonly_compaction_segfile_limit)));
+			break;
+		}
 		if (!ao_segfile_try_lock(RelationGetRelid(rel), sf->segno))
 			continue;
-		ao_compact(rel, storage_id, sf);
+		target = ao_compact(rel, storage_id, sf);
+		if (target == 0)
+			continue;
+		touched[sf->segno] = touched[target] = true;
 		compacted = true;
 	}
 
@@ -464,12 +536,20 @@ ao_vacuum_recycle_rel(Oid relid)
 {
 	Relation	rel;
 
+	/*
+	 * Cloudberry's faults of its post-cleanup phase, as vacuum_rel() begins
+	 * it and once it has the table: here on the segment that compacted,
+	 * where Cloudberry's coordinator, which sends each phase, has the first
+	 * too.
+	 */
+	(void) GP_FAULT("vacuum_relation_open_relation_during_drop_phase");
 	PushActiveSnapshot(GetTransactionSnapshot());
 	rel = try_relation_open(relid, ShareUpdateExclusiveLock);
 	if (rel != NULL)
 	{
 		if (ao_is_ao_table(rel))
 		{
+			(void) AO_FAULT("compaction_before_cleanup_phase", rel);
 			(void) ao_recycle(rel, ao_storage_id(rel), NULL);
 			(void) AO_FAULT("vacuum_ao_post_cleanup_end", rel);
 		}
