@@ -2003,6 +2003,9 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	}
 
 	drop_temp_namespaces();
+	/* VACUUM: what no snapshot here needs any more, the segments' to know */
+	if (IsA(parsetree, VacuumStmt))
+		GpDispatchHorizon();
 	GpDispatchUtility(build_payload(tree), class == GP_DISPATCH_OWN_XACT, builds);
 	check_extension_everywhere(parsetree);
 	if (IsA(parsetree, CreatedbStmt))

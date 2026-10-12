@@ -5306,6 +5306,32 @@ GpDispatchCommandOnContent(int content, const char *sql)
 	gang_wait_all(g, NULL, false);
 }
 
+/*
+ * Before a VACUUM, which the segments run in transactions of their own and
+ * are sent no distributed snapshot with: one of now, set and reset at once,
+ * for what it says of the transactions no snapshot can see in progress any
+ * more.  Each segment forgets its parts of those (gp_dtx.c), as it would at
+ * the next statement that brought a snapshot, so that its VACUUM knows
+ * which rows no snapshot in use can still read: a segment file of an
+ * append-optimized table that a VACUUM compacted is kept for as long as a
+ * distributed snapshot may hide the compaction (gp_ao's ao_vacuum.c).
+ */
+void
+GpDispatchHorizon(void)
+{
+	GpGang	   *g = gang_get();
+	char	   *ds;
+
+	gang_prepare(g, false);
+	ds = GpDtxHorizonString();
+	notices_quiet++;
+	gang_send_all(g, psprintf("SET " GP_DTX_SNAPSHOT_SETTING " = '%s'; RESET "
+							  GP_DTX_SNAPSHOT_SETTING, ds));
+	gang_wait_all(g, NULL, false);
+	notices_quiet--;
+	pfree(ds);
+}
+
 void
 GpDispatchUtility(const char *payload, bool own_xact, bool relay_notices)
 {

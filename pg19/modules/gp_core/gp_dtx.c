@@ -105,6 +105,23 @@
  * database's rows, the hold a restart or a promotion came with is lowered
  * but not raised.
  *
+ * A LOCAL TRANSACTION THAT FOLLOWS THE PARTS.  A transaction of a segment's
+ * own is no part of a distributed one -- VACUUM's, which the coordinator
+ * sends outside any transaction, an autovacuum worker's, a session's of the
+ * segment's own -- and a snapshot here sees it committed as it commits.
+ * That is right for one that changes no row a query reads.  One that
+ * rewrites what the parts wrote has read their rows: gp_ao's compaction,
+ * which moves a segment file's live rows into another and says so in the
+ * rows of gp_ao's own tables.  A distributed snapshot that still sees one of
+ * those parts in progress reads the table as it was before the part, and
+ * must read it as it was before the rewrite too, or it reads the moved rows
+ * twice.  So such a transaction asks to be hidden from every distributed
+ * snapshot that hides a part which had committed here as it worked
+ * (GpDtxFollowCommitted()): its ID is kept with each of those parts in the
+ * map, hidden with the part's own, and logged with each, so that a restart
+ * has it; and it is one no snapshot hides once the last of them has left
+ * the map (GpDtxIsFollowed()), which is when what it replaced may go.
+ *
  * Cloudberry sources this file stands in for:
  *	  src/backend/cdb/cdbtm.c (the segment's half), cdbdtxrecovery.c,
  *	  cdbdistributedsnapshot.c, cdblocaldistribxact.c and
@@ -282,6 +299,8 @@ fxid_cmp(const void *a, const void *b)
  * same snapshot is asked for by each dispatch of a statement, so the last
  * answer is kept.
  */
+static char *dtx_snapshot_string(Snapshot snapshot);
+
 char *
 GpDtxSnapshotString(Snapshot snapshot)
 {
@@ -290,10 +309,7 @@ GpDtxSnapshotString(Snapshot snapshot)
 	static TransactionId last_xmax = InvalidTransactionId;
 	static uint32 last_xcnt = 0;
 	static char *last = NULL;
-	FullTransactionId next;
-	FullTransactionId *xip;
-	TransactionId prune;
-	StringInfoData buf;
+	char	   *str;
 
 	if (snapshot == NULL || snapshot->snapshot_type != SNAPSHOT_MVCC)
 		return NULL;
@@ -302,6 +318,46 @@ GpDtxSnapshotString(Snapshot snapshot)
 		snapshot->xmin == last_xmin && snapshot->xmax == last_xmax &&
 		snapshot->xcnt == last_xcnt)
 		return last;
+
+	str = dtx_snapshot_string(snapshot);
+	if (last != NULL)
+		pfree(last);
+	last = MemoryContextStrdup(TopMemoryContext, str);
+	pfree(str);
+	last_snapshot = snapshot;
+	last_xmin = snapshot->xmin;
+	last_xmax = snapshot->xmax;
+	last_xcnt = snapshot->xcnt;
+	return last;
+}
+
+/*
+ * The coordinator: a snapshot taken now, as the segments are sent one, for
+ * a statement they run outside any transaction of the coordinator's, which
+ * is sent none -- VACUUM: what it says no snapshot can see in progress any
+ * more, the segments forget (dtx_snapshot_arrived()), as they would at the
+ * next statement that brought a snapshot.  Never the answer kept above: the
+ * oldest transaction a snapshot may see in progress moves while a snapshot's
+ * own numbers stay.
+ */
+char *
+GpDtxHorizonString(void)
+{
+	char	   *str;
+
+	PushActiveSnapshot(GetTransactionSnapshot());
+	str = dtx_snapshot_string(GetActiveSnapshot());
+	PopActiveSnapshot();
+	return str;
+}
+
+static char *
+dtx_snapshot_string(Snapshot snapshot)
+{
+	FullTransactionId next;
+	FullTransactionId *xip;
+	TransactionId prune;
+	StringInfoData buf;
 
 	next = ReadNextFullTransactionId();
 	prune = GetOldestTransactionIdConsideredRunning();
@@ -322,16 +378,7 @@ GpDtxSnapshotString(Snapshot snapshot)
 		appendStringInfo(&buf, "%s" UINT64_FORMAT, i > 0 ? "," : "",
 						 U64FromFullTransactionId(xip[i]));
 	pfree(xip);
-
-	if (last != NULL)
-		pfree(last);
-	last = MemoryContextStrdup(TopMemoryContext, buf.data);
-	pfree(buf.data);
-	last_snapshot = snapshot;
-	last_xmin = snapshot->xmin;
-	last_xmax = snapshot->xmax;
-	last_xcnt = snapshot->xcnt;
-	return last;
+	return buf.data;
 }
 
 /* Read one; false, and *why, when it is not one. */
@@ -477,17 +524,22 @@ dtx_in_progress(const GpDtxSnapshot *ds, FullTransactionId gxid)
  * One distributed transaction's part here: its coordinator ID, its local
  * top-level ID, and the subtransactions it committed, which a snapshot that
  * hides it has to hide too -- unknown for a part a restart left prepared,
- * whose snapshot then finds them through pg_subtrans.
+ * whose snapshot then finds them through pg_subtrans.  And the local
+ * transactions that follow it, hidden with it (GpDtxFollowCommitted()); an
+ * entry the log gave followers before it gave the part itself -- the part's
+ * row is another database's, or was deleted -- has no ID of its own.
  */
 typedef struct GpDtxEntry
 {
 	FullTransactionId gxid;
-	TransactionId xid;
+	TransactionId xid;			/* invalid: only followers are known */
 	bool		done;			/* committed or rolled back here */
 	bool		committed;
 	bool		one_phase;		/* committed here in one phase, not prepared */
 	int			nchildren;		/* -1: not known */
 	dsa_pointer children;		/* TransactionId[nchildren] */
+	int			nfollowers;
+	dsa_pointer followers;		/* TransactionId[nfollowers] */
 } GpDtxEntry;
 
 typedef struct GpDtxShared
@@ -610,11 +662,55 @@ map_lower_bound(FullTransactionId gxid)
 }
 
 static void
-map_free_entry(GpDtxEntry *e)
+map_free_children(GpDtxEntry *e)
 {
 	if (DsaPointerIsValid(e->children))
 		dsa_free(dtx_area, e->children);
 	e->children = InvalidDsaPointer;
+}
+
+static void
+map_free_entry(GpDtxEntry *e)
+{
+	map_free_children(e);
+	if (DsaPointerIsValid(e->followers))
+		dsa_free(dtx_area, e->followers);
+	e->followers = InvalidDsaPointer;
+	e->nfollowers = 0;
+}
+
+/* Is xid one of the entry's followers?  The lock is held. */
+static bool
+map_follows(const GpDtxEntry *e, TransactionId xid)
+{
+	return e->nfollowers > 0 &&
+		pg_lfind32(xid, (uint32 *) dsa_get_address(dtx_area, e->followers),
+				   e->nfollowers);
+}
+
+/*
+ * A follower of the entry's part, unless it is one already or the part
+ * itself; the lock is held exclusively.
+ */
+static bool
+map_add_follower(GpDtxEntry *e, TransactionId xid)
+{
+	dsa_pointer np;
+	TransactionId *f;
+
+	if (TransactionIdEquals(e->xid, xid) || map_follows(e, xid))
+		return false;
+	np = dsa_allocate(dtx_area, (e->nfollowers + 1) * sizeof(TransactionId));
+	f = dsa_get_address(dtx_area, np);
+	if (e->nfollowers > 0)
+		memcpy(f, dsa_get_address(dtx_area, e->followers),
+			   e->nfollowers * sizeof(TransactionId));
+	f[e->nfollowers] = xid;
+	if (DsaPointerIsValid(e->followers))
+		dsa_free(dtx_area, e->followers);
+	e->followers = np;
+	e->nfollowers++;
+	return true;
 }
 
 /* Add a part, or replace the one of that gxid; the lock is held exclusively. */
@@ -641,7 +737,8 @@ map_put(FullTransactionId gxid, TransactionId xid,
 	if (e != NULL && pos < dtx_shared->n &&
 		FullTransactionIdEquals(e[pos].gxid, gxid))
 	{
-		map_free_entry(&e[pos]);
+		/* its followers stay its followers */
+		map_free_children(&e[pos]);
 		e[pos].xid = xid;
 		e[pos].done = false;
 		e[pos].committed = false;
@@ -674,6 +771,8 @@ map_put(FullTransactionId gxid, TransactionId xid,
 	e[pos].one_phase = one_phase;
 	e[pos].nchildren = nchildren;
 	e[pos].children = cp;
+	e[pos].nfollowers = 0;
+	e[pos].followers = InvalidDsaPointer;
 	dtx_shared->n++;
 }
 
@@ -695,7 +794,8 @@ map_prune(FullTransactionId prune)
 		bool		old = FullTransactionIdPrecedes(e[i].gxid, prune);
 		bool		drop;
 
-		if (!e[i].done && old && !TransactionIdIsInProgress(e[i].xid))
+		if (!e[i].done && old && TransactionIdIsValid(e[i].xid) &&
+			!TransactionIdIsInProgress(e[i].xid))
 		{
 			e[i].done = true;
 			e[i].committed = TransactionIdDidCommit(e[i].xid);
@@ -724,7 +824,10 @@ xid_older(TransactionId a, TransactionId b)
 	return b;
 }
 
-/* The oldest transaction in the map; the lock is held. */
+/*
+ * The oldest transaction in the map; the lock is held.  A part's
+ * subtransactions are younger than it; a follower need not be.
+ */
 static TransactionId
 map_oldest(void)
 {
@@ -732,7 +835,16 @@ map_oldest(void)
 	TransactionId xmin = InvalidTransactionId;
 
 	for (int i = 0; i < dtx_shared->n; i++)
+	{
 		xmin = xid_older(xmin, e[i].xid);
+		if (e[i].nfollowers > 0)
+		{
+			TransactionId *f = dsa_get_address(dtx_area, e[i].followers);
+
+			for (int k = 0; k < e[i].nfollowers; k++)
+				xmin = xid_older(xmin, f[k]);
+		}
+	}
 	return xmin;
 }
 
@@ -882,8 +994,8 @@ log_part(FullTransactionId gxid, const TransactionId *children, int nchildren,
 {
 	Oid			relid = log_relid();
 	Relation	rel;
-	Datum		values[4];
-	bool		nulls[4] = {false, false, false, false};
+	Datum		values[5];
+	bool		nulls[5] = {false, false, false, false, false};
 	HeapTuple	tup;
 	GpDtxSnapshot *ds;
 
@@ -896,6 +1008,7 @@ log_part(FullTransactionId gxid, const TransactionId *children, int nchildren,
 	values[0] = FullTransactionIdGetDatum(gxid);
 	values[1] = FullTransactionIdGetDatum(GetTopFullTransactionId());
 	values[2] = BoolGetDatum(one_phase);
+	values[4] = BoolGetDatum(false);
 	if (nchildren > 0)
 	{
 		Datum	   *elems = palloc_array(Datum, nchildren);
@@ -922,12 +1035,59 @@ log_part(FullTransactionId gxid, const TransactionId *children, int nchildren,
 	PopActiveSnapshot();
 }
 
-/* A part the log has, read back. */
+/*
+ * A follower's rows, one for each part it follows, with the
+ * subtransactions it has committed: this transaction's, so that they commit
+ * with it.  No row is deleted here, as a part deletes a few: the
+ * transaction has no distributed snapshot to say which.
+ */
+static void
+log_followers(const FullTransactionId *gxids, int n,
+			  const TransactionId *children, int nchildren)
+{
+	Oid			relid = log_relid();
+	Relation	rel;
+	Datum		values[5];
+	bool		nulls[5] = {false, false, false, true, false};
+
+	if (!OidIsValid(relid) || n == 0)
+		return;
+
+	PushActiveSnapshot(GetLatestSnapshot());
+	rel = table_open(relid, RowExclusiveLock);
+	values[1] = FullTransactionIdGetDatum(GetTopFullTransactionId());
+	values[2] = BoolGetDatum(false);
+	if (nchildren > 0)
+	{
+		Datum	   *elems = palloc_array(Datum, nchildren);
+
+		for (int i = 0; i < nchildren; i++)
+			elems[i] = TransactionIdGetDatum(children[i]);
+		values[3] = PointerGetDatum(construct_array_builtin(elems, nchildren,
+															XIDOID));
+		nulls[3] = false;
+	}
+	values[4] = BoolGetDatum(true);
+	for (int i = 0; i < n; i++)
+	{
+		HeapTuple	tup;
+
+		values[0] = FullTransactionIdGetDatum(gxids[i]);
+		tup = heap_form_tuple(RelationGetDescr(rel), values, nulls);
+		CatalogTupleInsert(rel, tup);
+		heap_freetuple(tup);
+	}
+	table_close(rel, NoLock);
+	PopActiveSnapshot();
+}
+
+/* A part the log has, read back; or a follower of one. */
 typedef struct LoggedPart
 {
 	FullTransactionId gxid;
 	TransactionId xid;
 	bool		one_phase;
+	bool		follows;
 	int			nchildren;
 	TransactionId *children;
 } LoggedPart;
@@ -1009,6 +1169,7 @@ map_load_database(void)
 			p->gxid = DatumGetFullTransactionId(slot_getattr(tslot, 1, &isnull));
 			p->xid = XidFromFullTransactionId(DatumGetFullTransactionId(slot_getattr(tslot, 2, &isnull)));
 			p->one_phase = DatumGetBool(slot_getattr(tslot, 3, &isnull));
+			p->follows = DatumGetBool(slot_getattr(tslot, 5, &isnull));
 			children = slot_getattr(tslot, 4, &isnull);
 			if (!isnull)
 			{
@@ -1039,9 +1200,29 @@ map_load_database(void)
 		{
 			int			pos = map_lower_bound(p->gxid);
 			GpDtxEntry *e = map_entries();
+			bool		has = e != NULL && pos < dtx_shared->n &&
+				FullTransactionIdEquals(e[pos].gxid, p->gxid);
 
-			if (e != NULL && pos < dtx_shared->n &&
-				FullTransactionIdEquals(e[pos].gxid, p->gxid))
+			/*
+			 * A follower of the part: with the entry the map has for it, or
+			 * with one of no part yet, which this database's rows or
+			 * another's may still give it.
+			 */
+			if (p->follows)
+			{
+				if (!has)
+				{
+					map_put(p->gxid, InvalidTransactionId, NULL, 0, false);
+					e = map_entries();
+					e[pos].done = true;
+					e[pos].committed = true;
+				}
+				(void) map_add_follower(&e[pos], p->xid);
+				for (int c = 0; c < p->nchildren; c++)
+					(void) map_add_follower(&e[pos], p->children[c]);
+				continue;
+			}
+			if (has && TransactionIdIsValid(e[pos].xid))
 				continue;
 			map_put(p->gxid, p->xid, p->children, p->nchildren, p->one_phase);
 			e = map_entries();
@@ -1160,8 +1341,33 @@ dtx_craft(Snapshot snap, const GpDtxSnapshot *ds)
 	{
 		if (!dtx_in_progress(ds, e[i].gxid))
 			continue;
-		/* already in progress for this snapshot */
-		if (!TransactionIdPrecedes(e[i].xid, snap->xmax) ||
+
+		/*
+		 * The local transactions that follow the part, hidden with it: each
+		 * once, whichever of the parts it follows hides it, and not one this
+		 * snapshot sees in progress already.
+		 */
+		if (e[i].nfollowers > 0)
+		{
+			TransactionId *f = dsa_get_address(dtx_area, e[i].followers);
+
+			for (int k = 0; k < e[i].nfollowers; k++)
+			{
+				if (!TransactionIdPrecedes(f[k], snap->xmax) ||
+					pg_lfind32(f[k], snap->xip, snap->xcnt) ||
+					(!snap->suboverflowed &&
+					 pg_lfind32(f[k], snap->subxip, snap->subxcnt)) ||
+					(ntop > 0 && pg_lfind32(f[k], top, ntop)))
+					continue;
+				xid_append(&top, &ntop, &maxtop, f[k]);
+				if (TransactionIdPrecedes(f[k], xmin))
+					xmin = f[k];
+			}
+		}
+
+		/* no part of its own known, or already in progress for this snapshot */
+		if (!TransactionIdIsValid(e[i].xid) ||
+			!TransactionIdPrecedes(e[i].xid, snap->xmax) ||
 			pg_lfind32(e[i].xid, snap->xip, snap->xcnt) ||
 			(!snap->suboverflowed &&
 			 pg_lfind32(e[i].xid, snap->subxip, snap->subxcnt)))
@@ -1591,6 +1797,96 @@ GpDtxCommittedParts(uint64 **gxids)
 			(*gxids)[n++] = U64FromFullTransactionId(e[i].gxid);
 	LWLockRelease(&dtx_shared->lock);
 	return n;
+}
+
+/*
+ * The map, with what a restart left read into it, for a caller that may have
+ * no snapshot: reading it runs a query.
+ */
+static void
+dtx_map_ready(void)
+{
+	bool		pushed = !ActiveSnapshotSet();
+
+	dtx_attach();
+	if (pushed)
+		PushActiveSnapshot(GetTransactionSnapshot());
+	map_load();
+	if (pushed)
+		PopActiveSnapshot();
+}
+
+/*
+ * A segment: this transaction, which is no part of a distributed one, has
+ * rewritten what the parts committed here wrote, and is to be hidden from
+ * every distributed snapshot that hides one of them (A LOCAL TRANSACTION
+ * THAT FOLLOWS THE PARTS, above).  Called once its work is done and before
+ * it commits; nothing to do for a transaction that has no ID, or where no
+ * part committed here is one a snapshot in use may still hide.
+ */
+void
+GpDtxFollowCommitted(void)
+{
+	TransactionId xid;
+	TransactionId *children;
+	int			nchildren;
+	FullTransactionId *followed;
+	int			nfollowed = 0;
+	GpDtxEntry *e;
+
+	if (GpClusterContentId() < 0 || !IsTransactionState())
+		return;
+	xid = GetTopTransactionIdIfAny();
+	if (!TransactionIdIsValid(xid))
+		return;
+	nchildren = xactGetCommittedChildren(&children);
+
+	dtx_map_ready();
+	LWLockAcquire(&dtx_shared->lock, LW_EXCLUSIVE);
+	e = map_entries();
+	followed = palloc_array(FullTransactionId, Max(dtx_shared->n, 1));
+	for (int i = 0; i < dtx_shared->n; i++)
+	{
+		bool		added;
+
+		if (TransactionIdEquals(e[i].xid, xid) ||
+			!(e[i].done ? e[i].committed :
+			  (TransactionIdIsValid(e[i].xid) && TransactionIdDidCommit(e[i].xid))))
+			continue;
+		added = map_add_follower(&e[i], xid);
+		for (int c = 0; c < nchildren; c++)
+			(void) map_add_follower(&e[i], children[c]);
+		if (added)
+			followed[nfollowed++] = e[i].gxid;
+	}
+	if (nfollowed > 0)
+		map_hold();
+	LWLockRelease(&dtx_shared->lock);
+
+	log_followers(followed, nfollowed, children, nchildren);
+	pfree(followed);
+}
+
+/*
+ * A segment: may a distributed snapshot in use still hide this local
+ * transaction, which followed the parts as it committed?  Not once every
+ * part it followed has left the map.
+ */
+bool
+GpDtxIsFollowed(TransactionId xid)
+{
+	GpDtxEntry *e;
+	bool		result = false;
+
+	if (GpClusterContentId() < 0 || !TransactionIdIsValid(xid))
+		return false;
+	dtx_map_ready();
+	LWLockAcquire(&dtx_shared->lock, LW_SHARED);
+	e = map_entries();
+	for (int i = 0; i < dtx_shared->n && !result; i++)
+		result = map_follows(&e[i], xid);
+	LWLockRelease(&dtx_shared->lock);
+	return result;
 }
 
 static bool

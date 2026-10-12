@@ -111,6 +111,22 @@ extern void GpDtxReportXid(void);
 extern int	GpDtxCommittedParts(uint64 **gxids);
 
 /*
+ * A segment: the transaction running, of the segment's own, has rewritten
+ * what the parts committed here wrote -- gp_ao's compaction of a segment
+ * file -- and is hidden from every distributed snapshot that hides one of
+ * them; and whether one that asked so may still be hidden by a snapshot in
+ * use, which is how long what it replaced has to stay.
+ */
+extern void GpDtxFollowCommitted(void);
+extern bool GpDtxIsFollowed(TransactionId xid);
+
+/*
+ * The coordinator: a snapshot of now as the segments are sent one, for a
+ * statement they run in transactions of their own and are sent none with.
+ */
+extern char *GpDtxHorizonString(void);
+
+/*
  * The settings, the segment's hooks and shared memory, and on the
  * coordinator the recovery process; from gp_core's _PG_init.  After
  * GpMotionInit(): a fragment's snapshot is made distributed before the

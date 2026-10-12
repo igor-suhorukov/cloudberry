@@ -143,7 +143,8 @@ CREATE TABLE gp_internal.distributed_log (
 	gxid		xid8 NOT NULL,		-- the coordinator's transaction
 	xid			xid8 NOT NULL,		-- the part's own, here
 	one_phase	bool NOT NULL,
-	children	xid[]				-- the subtransactions it committed
+	children	xid[],				-- the subtransactions it committed
+	follows		bool NOT NULL		-- not the part: a local transaction hidden with it
 ) USING heap;
 CREATE INDEX distributed_log_gxid ON gp_internal.distributed_log (gxid);
 

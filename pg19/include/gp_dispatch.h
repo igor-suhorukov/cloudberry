@@ -227,6 +227,13 @@ extern void GpDispatchUtility(const char *payload, bool own_xact,
 							  bool relay_notices);
 
 /*
+ * Before a VACUUM is sent: the transactions no snapshot of the coordinator's
+ * can see in progress any more, told every segment, which is sent no
+ * distributed snapshot with a statement it runs in transactions of its own.
+ */
+extern void GpDispatchHorizon(void);
+
+/*
  * On a segment: is this the statement the coordinator dispatched?
  *
  * The coordinator ran it through every module's ProcessUtility hook, and what
