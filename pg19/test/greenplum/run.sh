@@ -678,7 +678,15 @@ chmod +x "$EXEC/bin/diff"
 # own would be counted: the test whose results file is the newest.  Nor at a
 # statement that is a pg_sleep() alone, which ends when it said it would:
 # dynamic_table's, SELECT pg_sleep(80), waits so for its dynamic table's job,
-# another backend of the database, which is watched.
+# another backend of the database, which is watched.  Nor at PostgreSQL 14's
+# wait_for_stats() alone, which PAX's copy of its stats test still has: 300
+# rounds of a tenth of a second and five queries, until the counters have
+# moved and the statistics snapshot's time has -- and that time is NULL in
+# PostgreSQL 19 unless stats_fetch_consistency is snapshot, as PAX's own
+# expected output has it, so the rounds are always 300.  Each query gathers
+# every table's counters from every segment (gp_stat_user_tables_summary):
+# 54 to 59 s of them here, which a full run's load took past the minute
+# twice, and a wait of a set length whatever it takes.
 TIMEOUT="${STATEMENT_TIMEOUT:-60 seconds}"
 QUIET_TESTS=" instr_in_shmem instr_in_shmem_verify "
 watchdog() {
@@ -692,7 +700,8 @@ watchdog() {
 			  FROM pg_stat_activity
 			 WHERE datname = 'regression' AND state = 'active'
 			   AND now() - query_start > interval '$TIMEOUT'
-			   AND query !~* '^\\s*select\\s+pg_sleep\\s*\\(\\s*[0-9.]+\\s*\\)\\s*;?\\s*$'" 2> /dev/null |
+			   AND query !~* '^\\s*select\\s+pg_sleep\\s*\\(\\s*[0-9.]+\\s*\\)\\s*;?\\s*$'
+			   AND query !~* '^\\s*select\\s+wait_for_stats\\s*\\(\\s*\\)\\s*;?\\s*$'" 2> /dev/null |
 		while read -r pid query; do
 			[ -n "$pid" ] || continue
 			PGOPTIONS="-c gp.optimizer=off" "$PSQL" -X -q -t -A -d postgres \
