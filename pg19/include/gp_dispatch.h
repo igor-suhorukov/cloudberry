@@ -338,6 +338,24 @@ extern void GpCopyInData(int content, const char *data, int len);
 extern void GpCopyInEnd(uint64 *counts);
 
 /*
+ * A piece put is not waited for: has a segment's last one left, so that it
+ * can be given another; and a wait for one that can, or has something to
+ * say.  Has a segment said its COPY failed; and a segment that is sent no
+ * more, whose COPY the end then fails.
+ */
+extern bool GpCopyInReady(int content);
+extern void GpCopyInWait(void);
+extern bool GpCopyInFailed(void);
+extern void GpCopyInStop(int content);
+
+/*
+ * On a segment: the COPY the coordinator sends rows for has failed, said in
+ * a notice of this SQLSTATE, which no error of PostgreSQL's has.
+ */
+#define GP_COPY_IN_FAILED_STATE	"XXGCF"
+extern void GpCopyInReportFailure(void);
+
+/*
  * A query on every segment (content -1) or one: the first column of each
  * segment's first row, as text, or NULL; one entry per segment asked.
  */

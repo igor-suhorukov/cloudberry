@@ -1101,6 +1101,50 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 		&& ok "a statement cancelled while its rows travel ends, at once or in order, and the session goes on" \
 		|| notok "a cancel while rows travel to the segments" "$out"
 
+	# A segment that reads slowly holds back its own rows, not the others':
+	# a piece goes to whichever segment can take one.  Segment 0's check
+	# sleeps 2 ms a row; while it is at its first few thousand, segment 1
+	# has been sent all of its 10 MB -- it had as little as segment 0 while
+	# the pieces went round the segments in turn, each waited for.
+	q 0 "CREATE FUNCTION rt_slow0(int) RETURNS bool LANGUAGE plpgsql AS \$\$ BEGIN
+	       IF pg_catalog.gp_execution_segment() = 0 THEN PERFORM pg_sleep(0.002); END IF; RETURN true; END \$\$;
+	     CREATE TABLE rt_pc (k int, v int, p text) DISTRIBUTED BY (k);
+	     INSERT INTO rt_pc SELECT i, i, '' FROM generate_series(1, 100000) i;
+	     CREATE TABLE rt_p (k int, v int CHECK (rt_slow0(v)), p text) DISTRIBUTED BY (k);
+	     CREATE TABLE rt_f (k int, v int CHECK (rt_slow0(v) AND v > 0), p text) DISTRIBUTED BY (k);" >/dev/null
+	n1=$(q 0 "SELECT count(*) FROM rt_pc WHERE gp_segment_id = 1;")
+	k1=$(q 0 "SELECT min(k) FROM rt_pc WHERE gp_segment_id = 1;")
+	(q 0 "SET statement_timeout = '120s'; INSERT INTO rt_p SELECT i, i, repeat('x', 200) FROM generate_series(1, 100000) i;" >/dev/null 2>&1) &
+	ins=$!
+	took1=0
+	for _ in $(seq 300); do
+		took1=$(q 2 "SELECT coalesce(sum(tuples_processed), 0) FROM pg_stat_progress_copy;")
+		isnum "$took1" && [ "$took1" -ge $((n1 - 1000)) ] && break
+		sleep 0.1
+	done
+	took0=$(q 1 "SELECT coalesce(sum(tuples_processed), 0) FROM pg_stat_progress_copy;")
+	q 0 "SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE query LIKE '%INSERT INTO rt_p SELECT%' AND pid <> pg_backend_pid();" >/dev/null
+	wait "$ins"
+	isnum "$took0" && isnum "$took1" && [ "$took1" -ge $((n1 - 1000)) ] && [ "$took0" -lt $((n1 / 2)) ] \
+		&& ok "a segment that reads slowly does not hold back the rows of the others" \
+		|| notok "rows to a fast segment beside a slow one" "segment 1 took $took1 of $n1 while segment 0 had $took0"
+
+	# A segment whose COPY fails says so at once, and the statement ends
+	# there: nothing more is sent, and the others' COPYs are cancelled.
+	# Segment 1 fails at its first row; segment 0, which sleeps 2 ms a row,
+	# had 50,000 rows to read before the statement could fail.
+	t0=$(date +%s)
+	out=$(q 0 "INSERT INTO rt_f SELECT i, CASE WHEN i = $k1 THEN -1 ELSE i END, repeat('x', 200) FROM generate_series(1, 100000) i;" | tr '\n' ' ')
+	took=$(( $(date +%s) - t0 ))
+	out2=$(q 0 "SELECT count(*) FROM rt_f;")
+	case "$out|$out2" in
+		"ERROR:  new row for relation \"rt_f\" violates check constraint \"rt_f_v_check\" DETAIL:  segment 1 ("*"): Failing row contains ($k1, -1, "*"|0")
+			[ "$took" -lt 30 ] \
+				&& ok "a segment whose rows fail ends the statement there, as its own error" \
+				|| notok "a statement whose rows fail on one segment ends there" "after $took s" ;;
+		*) notok "rows that fail on one segment early" "$out / $out2 / $took s" ;;
+	esac
+
 	# Cloudberry's options of COPY, which PostgreSQL's has not, through
 	# gp_exttable's filter: FILL MISSING FIELDS, NEWLINE, and text's ESCAPE,
 	# from the client, a file and a program; and a row no partition takes,

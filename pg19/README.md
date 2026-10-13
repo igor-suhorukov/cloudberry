@@ -472,7 +472,11 @@ Distributed transactions (M3), in `gp_core`:
   with the detector, in its slowest segment's.  Until they are sent the
   rows are held on the coordinator, in `work_mem` for all the segments
   together and in temporary files past it; a cancel reaches a statement
-  while it sends them;
+  while it sends them.  A piece of the rows goes to whichever segment can
+  take one, so a segment that reads slowly holds back its own rows alone;
+  and a segment whose rows fail says so at once, and the statement ends
+  there, the other segments' parts cancelled, where libpq would say it
+  only once every row had been sent;
 - **`SELECT ... FOR UPDATE`** and the other locking clauses: under ORCA as
   under the planner, the rows are locked by a LockRows node — at the top of
   the plan on one node, on the segments below the Gather on a cluster with

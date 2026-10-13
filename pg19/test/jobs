@@ -73,7 +73,7 @@ expandshrink           planner   85   PASSES=planner MEM=2500
 # they are loaded, in the tmpfs, 10.9 GB at most.
 tpc                    -         90   MEM=12000
 singlenode             planner   26   PASSES=planner MEM=3500
-cluster                -        115   MEM=700
+cluster                -        115   MEM=900
 ic                     -         30   MEM=900
 # ic_greenplum and ic_isolation2 run only on request (CB_IC; ic_greenplum/run.sh):
 # greenplum's and isolation2's ORCA passes again, over udp2 and over the

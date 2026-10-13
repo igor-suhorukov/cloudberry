@@ -96,6 +96,9 @@
 #include "libpq/auth.h"
 #include "libpq/libpq-be.h"
 #include "libpq/libpq-be-fe-helpers.h"
+#include "libpq/libpq.h"
+#include "libpq/pqformat.h"
+#include "libpq/protocol.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "nodes/pg_list.h"
@@ -111,6 +114,8 @@
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "storage/waiteventset.h"
+#include "tcop/dest.h"
+#include "tcop/tcopprot.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
@@ -670,6 +675,10 @@ typedef struct GpSegmentConn
 	bool		busy;			/* a statement was sent and has not finished */
 	bool		copying;		/* that statement is a COPY taking rows
 								 * (GpCopyInBegin()) */
+	bool		copy_failed;	/* ... which the segment says has failed
+								 * (GpCopyInReportFailure()) */
+	bool		copy_stopped;	/* ... and is to be ended short of its rows
+								 * (GpCopyInStop()) */
 
 	/*
 	 * When what is in flight is a gather's next batch, whose it is.  Several
@@ -751,7 +760,14 @@ static bool copy_ending = false;
 /* What a COPY whose statement failed here is told (copy_in_fail()). */
 #define COPY_IN_FAILED	"the statement that sent the rows failed"
 
+/*
+ * ... and one ended short of its rows because another segment's had failed
+ * (GpCopyInStop()): what the segment then answers is no error of its own.
+ */
+#define COPY_IN_STOPPED	"the rows failed on another segment"
+
 static void copy_in_fail(void);
+static bool copy_in_stopped(int content);
 pg_noreturn static void copy_in_send_failed(GpSegmentConn *c, bool ending);
 
 /*
@@ -2265,6 +2281,19 @@ segment_notice_receiver(void *arg, const struct pg_result *res)
 	char	   *p;
 	int			elevel;
 
+	/*
+	 * A segment's word that the COPY it is taking rows for has failed
+	 * (GpCopyInReportFailure()): for whoever sends the rows, and nobody else.
+	 */
+	if (sqlstate != NULL && strcmp(sqlstate, GP_COPY_IN_FAILED_STATE) == 0)
+	{
+		for (int i = 0; gang != NULL && i < gang->nconns; i++)
+			if ((const PGconn *) arg == gang->conns[i].conn &&
+				gang->conns[i].copying)
+				gang->conns[i].copy_failed = true;
+		return;
+	}
+
 	/* an error no statement was waiting for: the connection's last word */
 	if (arg != NULL && severity != NULL &&
 		(strcmp(severity, "ERROR") == 0 || strcmp(severity, "FATAL") == 0 ||
@@ -2908,6 +2937,23 @@ raise_segment_errors(List *errors)
 	 */
 	if (copy_ending)
 	{
+		List	   *own = NIL;
+
+		/*
+		 * Not a segment's answer to a COPY stopped short of its rows
+		 * (GpCopyInStop()) -- a statement cancelled, or a COPY failed by
+		 * its client, which is cancelled too -- where another segment has
+		 * an error of its own to say.
+		 */
+		foreach_ptr(GpSegmentError, err, errors)
+		{
+			if (!(err->sqlstate != NULL && strcmp(err->sqlstate, "57014") == 0 &&
+				  copy_in_stopped(err->content)))
+				own = lappend(own, err);
+		}
+		if (own != NIL)
+			errors = own;
+		first = (GpSegmentError *) linitial(errors);
 		foreach_ptr(GpSegmentError, err, errors)
 		{
 			if (err->content < first->content)
@@ -5973,7 +6019,17 @@ GpDispatchRelationName(Oid relid)
  * While the COPY goes the connections do not block in libpq: a segment
  * that reads slowly -- its COPY waits for a lock -- would hold the backend
  * in a send no cancel reaches, and with the deadlock detector on, a cancel
- * is how a deadlock between two statements' rows ends.
+ * is how a deadlock between two statements' rows ends.  Nor is a piece put
+ * waited for: the caller asks which segment can take another
+ * (GpCopyInReady()) and waits when none can (GpCopyInWait()), so that a
+ * segment that reads slowly holds up its own rows and not the others'.
+ *
+ * A segment whose COPY fails says so at once (GpCopyInReportFailure()),
+ * where libpq hands over an error of a connection in COPY mode only as the
+ * COPY is ended: the caller learns of it as it sends (GpCopyInFailed()),
+ * and ends the COPYs there, those short of their rows as stopped
+ * (GpCopyInStop()), rather than send every segment the rest of its rows to
+ * load, or to throw away, before the statement fails.
  */
 void
 GpCopyInBegin(const int *contents, int ncontents, const char *sql,
@@ -6015,6 +6071,7 @@ GpCopyInBegin(const int *contents, int ncontents, const char *sql,
 			{
 				PQclear(res);
 				c->copying = true;
+				c->copy_failed = c->copy_stopped = false;
 				ncopying++;
 				continue;
 			}
@@ -6099,27 +6156,167 @@ copy_in_flush(GpSegmentConn *c, bool ending)
 	}
 }
 
-/* A piece of the data, to one of the segments the COPY goes to. */
+/* The connection a COPY's rows go to a segment through. */
+static GpSegmentConn *
+copy_in_conn(int content)
+{
+	for (int i = 0; gang != NULL && i < gang->nconns; i++)
+		if (gang->conns[i].content == content && gang->conns[i].copying)
+			return &gang->conns[i];
+	elog(ERROR, "segment %d is not taking a COPY's rows", content);
+	return NULL;				/* keep the compiler quiet */
+}
+
+/*
+ * What a segment has said meanwhile, read and taken in: its notices, and
+ * with them its word that its COPY has failed.
+ */
+static void
+copy_in_hear(GpSegmentConn *c, bool ending)
+{
+	if (PQconsumeInput(c->conn) == 0)
+		copy_in_send_failed(c, ending);
+	(void) PQisBusy(c->conn);
+}
+
+/*
+ * A piece of the data, to one of the segments the COPY goes to.  It leaves
+ * as the segment's socket takes it, and is not waited for: GpCopyInReady()
+ * says when the segment can be given another.
+ */
 void
 GpCopyInData(int content, const char *data, int len)
 {
-	GpSegmentConn *c = NULL;
+	GpSegmentConn *c = copy_in_conn(content);
 
-	for (int i = 0; gang != NULL && i < gang->nconns; i++)
-		if (gang->conns[i].content == content && gang->conns[i].copying)
-			c = &gang->conns[i];
-	if (c == NULL)
-		elog(ERROR, "segment %d is not taking a COPY's rows", content);
-
-	if (PQputCopyData(c->conn, data, len) != 1)
+	if (PQputCopyData(c->conn, data, len) != 1 || PQflush(c->conn) < 0)
 		copy_in_send_failed(c, false);
-	copy_in_flush(c, false);
+	copy_in_hear(c, false);
+}
+
+/* Has the segment's last piece left, so that it can be given another? */
+bool
+GpCopyInReady(int content)
+{
+	GpSegmentConn *c = copy_in_conn(content);
+	int			rc = PQflush(c->conn);
+
+	if (rc < 0)
+		copy_in_send_failed(c, false);
+	return rc == 0;
+}
+
+/*
+ * Wait until a segment the COPY goes to can take more, or has something to
+ * say, taking interrupts: for the caller no segment of whose is ready.
+ */
+void
+GpCopyInWait(void)
+{
+	GpGang	   *g = gang;
+	WaitEventSet *wes;
+	WaitEvent	occurred[1];
+
+	Assert(g != NULL && ncopying > 0);
+	wes = CreateWaitEventSet(CurrentResourceOwner, g->nconns + 2);
+	AddWaitEventToSet(wes, WL_LATCH_SET, PGINVALID_SOCKET, MyLatch, NULL);
+	AddWaitEventToSet(wes, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET, NULL, NULL);
+	for (int i = 0; i < g->nconns; i++)
+	{
+		GpSegmentConn *c = &g->conns[i];
+		int			rc;
+
+		if (!c->copying)
+			continue;
+		if ((rc = PQflush(c->conn)) < 0)
+		{
+			FreeWaitEventSet(wes);
+			copy_in_send_failed(c, false);
+		}
+		AddWaitEventToSet(wes,
+						  WL_SOCKET_READABLE | (rc > 0 ? WL_SOCKET_WRITEABLE : 0),
+						  PQsocket(c->conn), NULL, NULL);
+	}
+	(void) WaitEventSetWait(wes, 1000, occurred, 1, dispatch_wait_event());
+	FreeWaitEventSet(wes);
+	ResetLatch(MyLatch);
+	CHECK_FOR_INTERRUPTS();
+	gang_check_moved(gang);
+	for (int i = 0; gang != NULL && i < gang->nconns; i++)
+		if (gang->conns[i].copying)
+			copy_in_hear(&gang->conns[i], false);
+}
+
+/* Has a segment said that its COPY failed? */
+bool
+GpCopyInFailed(void)
+{
+	for (int i = 0; gang != NULL && i < gang->nconns; i++)
+		if (gang->conns[i].copying && gang->conns[i].copy_failed)
+			return true;
+	return false;
+}
+
+/*
+ * A segment that is sent no more of its rows, another's COPY having failed:
+ * its statement is cancelled and its COPY ended as failed (GpCopyInEnd()),
+ * and what it answers to that -- a statement cancelled -- is not the
+ * statement's error where a segment has one of its own
+ * (raise_segment_errors()).  One that has said its own COPY failed is sent
+ * no more either, and has its error to say.
+ */
+void
+GpCopyInStop(int content)
+{
+	GpSegmentConn *c = copy_in_conn(content);
+
+	if (!c->copy_failed)
+		c->copy_stopped = true;
+}
+
+/* Was the COPY last sent to this segment stopped so? */
+static bool
+copy_in_stopped(int content)
+{
+	for (int i = 0; gang != NULL && i < gang->nconns; i++)
+		if (gang->conns[i].content == content)
+			return gang->conns[i].copy_stopped;
+	return false;
+}
+
+/*
+ * A segment, as the COPY the coordinator sends it rows for fails: its word
+ * of it, now.  The error itself the coordinator's libpq keeps to itself
+ * until the COPY is ended, which is after every row has been sent; a notice
+ * it hands over as it comes.  Sent whatever client_min_messages is, and
+ * taken by segment_notice_receiver() for the rows' sender alone.
+ */
+void
+GpCopyInReportFailure(void)
+{
+	StringInfoData buf;
+
+	if (whereToSendOutput != DestRemote)
+		return;
+	pq_beginmessage(&buf, PqMsg_NoticeResponse);
+	pq_sendbyte(&buf, PG_DIAG_SEVERITY);
+	pq_sendstring(&buf, "LOG");
+	pq_sendbyte(&buf, PG_DIAG_SEVERITY_NONLOCALIZED);
+	pq_sendstring(&buf, "LOG");
+	pq_sendbyte(&buf, PG_DIAG_SQLSTATE);
+	pq_sendstring(&buf, GP_COPY_IN_FAILED_STATE);
+	pq_sendbyte(&buf, PG_DIAG_MESSAGE_PRIMARY);
+	pq_sendstring(&buf, "the rows sent to this segment failed");
+	pq_sendbyte(&buf, '\0');
+	pq_endmessage(&buf);
+	(void) pq_flush();
 }
 
 /*
  * End the COPY on every segment it goes to, and wait for them: how many
  * rows each took, in the segments' order, or why one failed -- the first of
  * them in that order, its error's context given to GpCopyInBegin()'s caller.
+ * A segment stopped (GpCopyInStop()) is cancelled, and told its COPY failed.
  */
 void
 GpCopyInEnd(uint64 *counts)
@@ -6132,6 +6329,25 @@ GpCopyInEnd(uint64 *counts)
 	Assert(g != NULL && ncopying > 0);
 	ended = palloc0_array(bool, g->nconns);
 	results = (PGresult **) palloc0_array(PGresult *, g->nconns);
+
+	/*
+	 * Those stopped are cancelled, all of them before any COPY is ended: one
+	 * may wait for a lock, or have much to read yet, and would learn that
+	 * its COPY has failed only after that -- and the end of each COPY waits
+	 * for its segment to have read what it was sent.
+	 */
+	for (int i = 0; i < g->nconns; i++)
+	{
+		GpSegmentConn *c = &g->conns[i];
+		const char *err;
+
+		if (!c->copying || !c->copy_stopped)
+			continue;
+		err = libpqsrv_cancel(c->conn, GetCurrentTimestamp() + 30 * USECS_PER_SEC);
+		if (err != NULL)
+			elog(DEBUG1, "could not cancel the query on segment %d: %s",
+				 c->content, err);
+	}
 
 	for (int i = 0; i < g->nconns; i++)
 	{
@@ -6147,7 +6363,7 @@ GpCopyInEnd(uint64 *counts)
 		 */
 		(void) GP_FAULT("cdb_copy_end_internal_start");
 
-		if (PQputCopyEnd(c->conn, NULL) != 1)
+		if (PQputCopyEnd(c->conn, c->copy_stopped ? COPY_IN_STOPPED : NULL) != 1)
 			copy_in_send_failed(c, true);
 		copy_in_flush(c, true);
 		if (PQsetnonblocking(c->conn, 0) != 0)

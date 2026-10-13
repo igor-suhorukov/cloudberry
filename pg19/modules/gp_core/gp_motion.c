@@ -5644,16 +5644,32 @@ motion_copy_fault_utility(PlannedStmt *pstmt, const char *queryString,
 						  DestReceiver *dest, QueryCompletion *qc)
 {
 	Node	   *parsetree = pstmt->utilityStmt;
-
-	if (GpClusterIsDispatched() && IsA(parsetree, CopyStmt) &&
+	bool		routed = GpClusterIsDispatched() && IsA(parsetree, CopyStmt) &&
 		((CopyStmt *) parsetree)->is_from &&
-		((CopyStmt *) parsetree)->filename == NULL)
+		((CopyStmt *) parsetree)->filename == NULL;
+
+	if (routed)
 		(void) GP_FAULT("func_init_plan_end");
 
-	if (prev_motion_utility)
-		prev_motion_utility(pstmt, queryString, readOnlyTree, context,
-							params, queryEnv, dest, qc);
-	else
-		standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+	/*
+	 * ... and where the part fails, the coordinator is told now, while it
+	 * still sends rows: the error itself it has only once it has sent them
+	 * all (GpCopyInReportFailure(), gp_dispatch.c).
+	 */
+	PG_TRY();
+	{
+		if (prev_motion_utility)
+			prev_motion_utility(pstmt, queryString, readOnlyTree, context,
 								params, queryEnv, dest, qc);
+		else
+			standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+									params, queryEnv, dest, qc);
+	}
+	PG_CATCH();
+	{
+		if (routed)
+			GpCopyInReportFailure();
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 }

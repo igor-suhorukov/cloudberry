@@ -542,13 +542,33 @@ router_next_piece(GpRouter *r, Tuplestorestate *store, bool first,
 	return true;
 }
 
+/* Can every segment a store's rows go to be given a piece more? */
+static bool
+router_ready(GpRouter *r, const int *segs, int nsegs, int i)
+{
+	if (!r->replicated)
+		return GpCopyInReady(segs[i]);
+	for (int j = 0; j < nsegs; j++)
+		if (!GpCopyInReady(segs[j]))
+			return false;
+	return true;
+}
+
 /*
  * Send the segments listed their rows, all of them at once: a piece of each
- * segment's in turn, so that each loads while the others are sent theirs,
- * and the statement takes its slowest segment's time, not their times
- * together.  A replicated table's rows are one store's, and each piece of it
- * goes to every segment listed.  Answer how many rows the segments took; of
- * a replicated table, how many one of them did.
+ * segment's as that segment can take one, so that each loads while the
+ * others are sent theirs, and the statement takes its slowest segment's
+ * time, not their times together -- nor does a segment that reads slowly
+ * hold back the rows of the others.  A replicated table's rows are one
+ * store's, each piece of which goes to every segment listed, as the slowest
+ * of them takes it.  Answer how many rows the segments took; of a
+ * replicated table, how many one of them did.
+ *
+ * Once a segment says its COPY has failed, nothing more is sent: the COPYs
+ * are ended, those not yet sent all their rows as failed, and the end
+ * raises the error -- the first segment's in their order of those that had
+ * one by then.  A statement of few rows has sent them all before any
+ * segment answers, and says what it said when they went in that order.
  */
 static uint64
 router_send(GpRouter *r, const int *segs, int nsegs)
@@ -559,6 +579,7 @@ router_send(GpRouter *r, const int *segs, int nsegs)
 	uint64	   *counts = palloc0_array(uint64, nsegs);
 	uint64		total = 0;
 	bool		any;
+	bool		failed = false;
 	StringInfoData buf;
 	MemoryContext rowcxt = AllocSetContextCreate(CurrentMemoryContext,
 												 "gp_core routed row",
@@ -570,27 +591,46 @@ router_send(GpRouter *r, const int *segs, int nsegs)
 	memset(more, true, nstores * sizeof(bool));
 	do
 	{
+		bool		sent = false;
+
 		any = false;
-		for (int i = 0; i < nstores; i++)
+		for (int i = 0; i < nstores && !failed; i++)
 		{
 			if (!more[i])
+				continue;
+			any = true;
+			if (!router_ready(r, segs, nsegs, i))
 				continue;
 			more[i] = router_next_piece(r, r->stores[r->replicated ? 0 : segs[i]],
 										!begun[i], &buf, rowcxt);
 			begun[i] = true;
-			any = any || more[i];
-			if (buf.len == 0)
-				continue;
-			if (r->replicated)
+			sent = true;
+			if (buf.len > 0)
 			{
-				for (int j = 0; j < nsegs; j++)
-					GpCopyInData(segs[j], buf.data, buf.len);
+				if (r->replicated)
+				{
+					for (int j = 0; j < nsegs; j++)
+						GpCopyInData(segs[j], buf.data, buf.len);
+				}
+				else
+					GpCopyInData(segs[i], buf.data, buf.len);
 			}
-			else
-				GpCopyInData(segs[i], buf.data, buf.len);
 			CHECK_FOR_INTERRUPTS();
+			failed = GpCopyInFailed();
 		}
-	} while (any);
+		if (any && !sent && !failed)
+		{
+			GpCopyInWait();
+			failed = GpCopyInFailed();
+		}
+	} while (any && !failed);
+
+	if (failed)
+	{
+		for (int i = 0; i < nsegs; i++)
+			if (more[r->replicated ? 0 : i])
+				GpCopyInStop(segs[i]);
+	}
 
 	pfree(buf.data);
 	MemoryContextDelete(rowcxt);
