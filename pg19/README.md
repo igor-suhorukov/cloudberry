@@ -589,9 +589,11 @@ as PAX's O22, done in the modules, and O23 pg_checksums' reader alone):
   and its compaction, an insert's rows spread over several segment files
   (`gp.appendonly_insert_files` and `..._tuples_range`) and
   `pg_appendonly.segfilecount` as ANALYZE counts it, on one node and on the
-  cluster; and unlogged ones, which a crash empties, with their rows in
-  unlogged twins of `gp_ao`'s tables, as Cloudberry's have unlogged aux
-  tables;
+  cluster; ANALYZE's sample taken through the block directory, the blocks
+  of the sampled rows read and no others, where the table has more than
+  twice as many blocks as the sample has rows; and unlogged ones, which a
+  crash empties, with their rows in unlogged twins of `gp_ao`'s tables, as
+  Cloudberry's have unlogged aux tables;
 - `gp_exttable`: external tables, as foreign tables of `gp_exttable_server`
   -- `file://`, `EXECUTE`, `gpfdist://` and `http://` through libcurl, a
   protocol's own functions, text, CSV and a formatter's custom format,

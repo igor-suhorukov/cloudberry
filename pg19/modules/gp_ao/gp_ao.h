@@ -468,6 +468,9 @@ extern bool ao_is_ao_table(Relation rel);
 extern const TableAmRoutine *ao_table_am_routine(bool columnar);
 extern void ao_register_table_ams(void);
 extern void ao_fetch_cache_reset(void);
+extern int	ao_sample_by_directory(Relation rel, Snapshot snapshot,
+								   HeapTuple *rows, int targrows,
+								   double *liverows);
 extern void ao_scan_set_segno(TableScanDesc scan, int segno);
 extern void ao_brin_leave_written(bool on);
 extern void ao_vacuum_rel(Relation rel, const struct VacuumParams *params,

@@ -69,6 +69,7 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/sampling.h"
 #include "utils/snapmgr.h"
 
 #include "gp_ao.h"
@@ -513,6 +514,256 @@ ao_fetch_row(AoFetchDesc fd, ItemPointer tid, Snapshot snapshot,
 		return false;
 	ao_fetch_store(fd, segno, rownum, slot);
 	return true;
+}
+
+/* ------------------------------------------------------------------------- */
+/* ANALYZE's sample, by the block directory                                  */
+/* ------------------------------------------------------------------------- */
+
+/* Which of a block's rows, counted from 0, is its n-th visible one. */
+static int
+ao_nth_visible(const uint64 *words, int n)
+{
+	for (int w = 0;; w++)
+	{
+		uint64		word = words[w];
+		int			count = pg_popcount64(word);
+
+		if (n >= count)
+		{
+			n -= count;
+			continue;
+		}
+		while (n-- > 0)
+			word &= word - 1;	/* the lowest row of the word, passed over */
+		return w * 64 + pg_rightmost_one_pos64(word);
+	}
+}
+
+static int
+ao_compare_tids(const void *a, const void *b)
+{
+	return ItemPointerCompare((ItemPointer) a, (ItemPointer) b);
+}
+
+/*
+ * A sample of the table's rows that reads only the blocks the sampled rows
+ * are in, where reading every row is what a sample of an append-optimized
+ * table cost: Cloudberry's samples such a table by row number too, through
+ * its block directory or the blocks' headers (appendonly_acquire_sample_rows(),
+ * "fast analyze").
+ *
+ * The directory has a row a block, which says how many rows the block has,
+ * and the visibility map which of them are deleted: so the rows the snapshot
+ * sees are counted, and a reservoir of targrows of their TIDs kept by
+ * Vitter's algorithm, without one of them read -- the rows it passes over
+ * are passed over a block at a time.  The rows chosen are then read, in
+ * the order of their TIDs, a block read once for the rows chosen of it.
+ * What comes is what the reservoir over a scan of the table gives
+ * (ao_acquire_sample_rows(), gp_ao.c): each row as likely as any other.
+ *
+ * Returns how many rows it sampled, their count in *liverows; or -1 where a
+ * scan is as cheap and the caller is to make one: the table has no more
+ * rows than are asked for, or so few blocks that the sample is in most of
+ * them.
+ */
+int
+ao_sample_by_directory(Relation rel, Snapshot snapshot, HeapTuple *rows,
+					   int targrows, double *liverows)
+{
+	int64		storage_id = ao_storage_id(rel);
+	Snapshot	msnap = ao_meta_snapshot(snapshot);
+	MemoryContext cxt;
+	MemoryContext sfcxt;
+	MemoryContext old;
+	AoSegfile  *segfiles;
+	int			nsegfiles;
+	ItemPointerData *tids;
+	uint64	   *words;
+	int			nwords = (AO_MAX_ROWS_PER_BLOCK + 63) / 64;
+	ReservoirStateData rstate;
+	double		seen = 0;
+	double		rowstoskip = -1;
+	int64		nblocks = 0;
+	int			nchosen = 0;
+	int			numrows = 0;
+	AoFetchDesc fd;
+	TupleTableSlot *slot;
+
+	/* a scan that reads the deleted rows too is no sample of the table's */
+	if (gp_select_invisible || targrows <= 0)
+		return -1;
+
+	cxt = AllocSetContextCreate(CurrentMemoryContext, "gp_ao sample",
+								ALLOCSET_DEFAULT_SIZES);
+	old = MemoryContextSwitchTo(cxt);
+	segfiles = ao_segfiles_read(storage_id, msnap, &nsegfiles);
+
+	/* too few blocks, as the segment files count theirs: not worth a look */
+	for (int i = 0; i < nsegfiles; i++)
+		if (segfiles[i].state != AO_SEGFILE_AWAITING_DROP)
+			nblocks += segfiles[i].varblockcount;
+	if (nblocks < 2 * (int64) targrows)
+	{
+		MemoryContextSwitchTo(old);
+		MemoryContextDelete(cxt);
+		return -1;
+	}
+	nblocks = 0;
+
+	tids = MemoryContextAlloc(old, sizeof(ItemPointerData) * targrows);
+	words = palloc_array(uint64, nwords);
+	reservoir_init_selection_state(&rstate, targrows);
+
+	/* a segment file's map and directory scan, gone with the file */
+	sfcxt = AllocSetContextCreate(cxt, "gp_ao sample segment file",
+								  ALLOCSET_DEFAULT_SIZES);
+	for (int i = 0; i < nsegfiles; i++)
+	{
+		AoSegfile  *sf = &segfiles[i];
+		AoVisimap  *vm;
+		AoBlkdirScan *bs;
+		AoBlkdirEntry entry;
+
+		/* as a scan passes them over (ao_scan_next_segfile()) */
+		if (sf->state == AO_SEGFILE_AWAITING_DROP || sf->tupcount == 0)
+			continue;
+		MemoryContextSwitchTo(sfcxt);
+		vm = ao_visimap_load(storage_id, sf->segno, msnap);
+		bs = ao_blkdir_scan_begin(storage_id, sf->segno, msnap);
+		while (ao_blkdir_scan_next(bs, &entry))
+		{
+			int			live;
+			int			at = 0;	/* of the block's visible rows, the next */
+
+			vacuum_delay_point(true);
+			if (entry.offsets != NULL)
+				pfree(entry.offsets);
+			if (entry.nrows <= 0)
+				continue;
+			if ((entry.nrows + 63) / 64 > nwords)
+			{
+				nwords = (entry.nrows + 63) / 64;
+				words = repalloc_array(words, uint64, nwords);
+			}
+			nblocks++;
+			live = entry.nrows - ao_visimap_visible_words(vm, entry.first_row,
+														  entry.nrows, words);
+			while (at < live)
+			{
+				int			k;
+
+				if (nchosen < targrows)
+					k = nchosen++;
+				else
+				{
+					if (rowstoskip < 0)
+						rowstoskip = reservoir_get_next_S(&rstate, seen, targrows);
+					if (rowstoskip >= live - at)
+					{
+						/* the rest of the block, and some of the next */
+						rowstoskip -= live - at;
+						seen += live - at;
+						break;
+					}
+					at += (int) rowstoskip;
+					seen += rowstoskip;
+					rowstoskip = -1;
+					k = (int) (targrows * sampler_random_fract(&rstate.randstate));
+				}
+				AoTidSet(&tids[k], sf->segno,
+						 entry.first_row + ao_nth_visible(words, at));
+				at++;
+				seen += 1;
+			}
+		}
+		ao_blkdir_scan_end(bs);
+		MemoryContextSwitchTo(cxt);
+		MemoryContextReset(sfcxt);
+	}
+	MemoryContextSwitchTo(old);
+	MemoryContextDelete(cxt);
+
+	*liverows = seen;
+	if (seen <= targrows || nblocks < 2 * (int64) nchosen)
+	{
+		pfree(tids);
+		return -1;
+	}
+
+	/*
+	 * The rows chosen, in the order of their TIDs, which is the directory's:
+	 * each segment file's directory is walked once more, and the block of a
+	 * row chosen read where the walk comes to it, with no look for it.
+	 */
+	qsort(tids, nchosen, sizeof(ItemPointerData), ao_compare_tids);
+	fd = ao_fetch_begin(rel);
+	slot = table_slot_create(rel, NULL);
+	sfcxt = AllocSetContextCreate(CurrentMemoryContext,
+								  "gp_ao sample segment file",
+								  ALLOCSET_DEFAULT_SIZES);
+	while (numrows < nchosen)
+	{
+		int			segno = AoTidSegno(&tids[numrows]);
+		AoBlkdirScan *bs;
+		AoBlkdirEntry entry = {0};
+		bool		found = true;
+
+		old = MemoryContextSwitchTo(sfcxt);
+		bs = ao_blkdir_scan_begin(storage_id, segno, msnap);
+		while (numrows < nchosen && AoTidSegno(&tids[numrows]) == segno)
+		{
+			int64		rownum = AoTidRownum(&tids[numrows]);
+
+			/* on to the block the row is in */
+			do
+			{
+				vacuum_delay_point(true);
+				if (entry.offsets != NULL)
+					pfree(entry.offsets);
+				entry.offsets = NULL;
+				found = ao_blkdir_scan_next(bs, &entry);
+			} while (found &&
+					 (entry.nrows <= 0 || entry.first_row + entry.nrows <= rownum));
+			if (!found || entry.first_row > rownum)
+			{
+				found = false;
+				break;
+			}
+
+			/* ... and every row chosen of it */
+			fd->entry = entry;
+			while (numrows < nchosen && AoTidSegno(&tids[numrows]) == segno &&
+				   AoTidRownum(&tids[numrows]) < entry.first_row + entry.nrows)
+			{
+				MemoryContextSwitchTo(old);
+				ao_fetch_store(fd, segno, AoTidRownum(&tids[numrows]), slot);
+				rows[numrows] = ExecCopySlotHeapTuple(slot);
+				rows[numrows]->t_self = slot->tts_tid;
+				numrows++;
+				MemoryContextSwitchTo(sfcxt);
+			}
+		}
+		ao_blkdir_scan_end(bs);
+		MemoryContextSwitchTo(old);
+		MemoryContextReset(sfcxt);
+		if (!found)
+			break;
+	}
+	ExecClearTuple(slot);
+	ExecDropSingleTupleTableSlot(slot);
+	ao_fetch_end(fd);
+	MemoryContextDelete(sfcxt);
+	pfree(tids);
+
+	/* a row the first walk counted and the second has not: scan */
+	if (numrows < nchosen)
+	{
+		for (int i = 0; i < numrows; i++)
+			heap_freetuple(rows[i]);
+		return -1;
+	}
+	return numrows;
 }
 
 /* ------------------------------------------------------------------------- */

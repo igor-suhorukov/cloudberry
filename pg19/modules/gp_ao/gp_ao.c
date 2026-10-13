@@ -1547,9 +1547,13 @@ gp_ao_post_parse_analyze(ParseState *pstate, Query *query, const JumbleState *js
 
 /*
  * The rows of an append-optimized table are in no page ANALYZE can pick, so
- * it is sampled here: every live row read, and a reservoir kept by Vitter's
- * algorithm, as acquire_sample_rows() keeps one of the rows of the pages it
- * reads, then sorted by TID, as it sorts its sample for the correlation.
+ * it is sampled here: by the block directory, which says where each block
+ * of rows is, so that only the blocks of the rows sampled are read
+ * (ao_sample_by_directory(), ao_am.c); or, for a table of few blocks or of
+ * no more rows than the sample wants, every live row read, and a reservoir
+ * kept by Vitter's algorithm, as acquire_sample_rows() keeps one of the
+ * rows of the pages it reads, then sorted by TID, as it sorts its sample
+ * for the correlation.
  */
 static int
 compare_rows(const void *a, const void *b, void *arg)
@@ -1575,40 +1579,46 @@ ao_acquire_sample_rows(Relation rel, int elevel, HeapTuple *rows,
 	int			nsegfiles;
 	int64		storage_id = ao_storage_id(rel);
 
-	reservoir_init_selection_state(&rstate, targrows);
-	slot = table_slot_create(rel, NULL);
-	scan = table_beginscan(rel, snapshot, 0, NULL, SO_NONE);
-	while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
+	numrows = ao_sample_by_directory(rel, snapshot, rows, targrows, &liverows);
+	if (numrows < 0)
 	{
-		vacuum_delay_point(true);
-		if (numrows < targrows)
+		numrows = 0;
+		liverows = 0;
+		reservoir_init_selection_state(&rstate, targrows);
+		slot = table_slot_create(rel, NULL);
+		scan = table_beginscan(rel, snapshot, 0, NULL, SO_NONE);
+		while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
 		{
-			rows[numrows] = ExecCopySlotHeapTuple(slot);
-			rows[numrows]->t_self = slot->tts_tid;
-			numrows++;
-		}
-		else
-		{
-			if (rowstoskip < 0)
-				rowstoskip = reservoir_get_next_S(&rstate, liverows, targrows);
-			if (rowstoskip <= 0)
+			vacuum_delay_point(true);
+			if (numrows < targrows)
 			{
-				int			k = (int) (targrows * sampler_random_fract(&rstate.randstate));
-
-				Assert(k >= 0 && k < targrows);
-				heap_freetuple(rows[k]);
-				rows[k] = ExecCopySlotHeapTuple(slot);
-				rows[k]->t_self = slot->tts_tid;
+				rows[numrows] = ExecCopySlotHeapTuple(slot);
+				rows[numrows]->t_self = slot->tts_tid;
+				numrows++;
 			}
-			rowstoskip -= 1;
-		}
-		liverows += 1;
-	}
-	table_endscan(scan);
-	ExecDropSingleTupleTableSlot(slot);
+			else
+			{
+				if (rowstoskip < 0)
+					rowstoskip = reservoir_get_next_S(&rstate, liverows, targrows);
+				if (rowstoskip <= 0)
+				{
+					int			k = (int) (targrows * sampler_random_fract(&rstate.randstate));
 
-	if (numrows == targrows)
-		qsort_interruptible(rows, numrows, sizeof(HeapTuple), compare_rows, NULL);
+					Assert(k >= 0 && k < targrows);
+					heap_freetuple(rows[k]);
+					rows[k] = ExecCopySlotHeapTuple(slot);
+					rows[k]->t_self = slot->tts_tid;
+				}
+				rowstoskip -= 1;
+			}
+			liverows += 1;
+		}
+		table_endscan(scan);
+		ExecDropSingleTupleTableSlot(slot);
+
+		if (numrows == targrows)
+			qsort_interruptible(rows, numrows, sizeof(HeapTuple), compare_rows, NULL);
+	}
 
 	*totalrows = liverows;
 	*totaldeadrows = 0;

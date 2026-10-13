@@ -596,6 +596,46 @@ is "ANALYZE samples every live row" \
    "ANALYZE c1; SELECT reltuples FROM pg_class WHERE relname = 'c1';" "5000"
 is "TABLESAMPLE takes rows as Cloudberry's does" \
    "SELECT count(*) FROM c1 TABLESAMPLE SYSTEM (100);" "5000"
+# A table of many more blocks than the sample has rows is sampled by its
+# block directory: the rows are chosen by the directory's counts and the
+# visibility map, and only their blocks are read (ao_sample_by_directory()).
+# 300 rows of 400,000, in blocks of 8 kB; a quarter of the rows were
+# deleted, and the rows of a transaction that rolled back are in the files
+# too.  What ANALYZE reads of the table's pages is counted as a scan's is,
+# and set beside what a sample of 30,000 rows reads, which is of nearly
+# every block and so made by reading them all.
+reads() { q "SELECT pg_stat_force_next_flush();
+             SELECT coalesce(heap_blks_read, 0) + coalesce(heap_blks_hit, 0) FROM pg_statio_user_tables WHERE relname = '$1';" | tail -1; }
+for am in ao_row ao_column; do
+	t="sd_$am"
+	q "CREATE TABLE $t (a int, g int, m text, pad text) USING $am WITH (blocksize = 8192);
+	   INSERT INTO $t SELECT i, i % 10, CASE WHEN i % 4 = 0 THEN 'gone' ELSE 'kept' END, repeat('p', 60)
+	     FROM generate_series(1, 200000) i;" > /dev/null
+	printf '%s\n' "BEGIN;" "INSERT INTO $t SELECT i, 77, 'undone', 'u' FROM generate_series(1, 50000) i;" "ROLLBACK;" |
+		"$PSQL" -X -q -d postgres -f - > /dev/null 2>&1
+	q "INSERT INTO $t SELECT i, i % 10, CASE WHEN i % 4 = 0 THEN 'gone' ELSE 'kept' END, repeat('p', 60)
+	     FROM generate_series(200001, 400000) i;
+	   DELETE FROM $t WHERE m = 'gone';" > /dev/null
+	r0=$(reads "$t")
+	q "ANALYZE $t;" > /dev/null
+	r1=$(reads "$t")
+	q "SET default_statistics_target = 1; ANALYZE $t;" > /dev/null
+	r2=$(reads "$t")
+	out=$(q "SELECT reltuples FROM pg_class WHERE relname = '$t';
+	         SELECT string_agg(attname || ':' || coalesce(most_common_vals::text, '') || ':' || n_distinct, ' ' ORDER BY attname)
+	           FROM pg_stats WHERE tablename = '$t' AND attname IN ('g', 'm');" | tr '\n' ' ')
+	if [[ "$out" == "300000 g:{"*"}:10 m:{kept}:1 " ]] && [[ "$out" != *77* ]]; then
+		ok "$am: a sample by the block directory counts the live rows, and has none deleted or rolled back"
+	else
+		notok "$am: the statistics of a sample by the block directory" "$out"
+	fi
+	if [[ "$r0" =~ ^[0-9]+$ ]] && [[ "$r1" =~ ^[0-9]+$ ]] && [[ "$r2" =~ ^[0-9]+$ ]] &&
+	   [ $((r2 - r1)) -gt 0 ] && [ $(((r2 - r1) * 4)) -lt $((r1 - r0)) ]; then
+		ok "$am: and reads the blocks of the rows it takes, not the table"
+	else
+		notok "$am: the pages a sample by the block directory reads" "$((r2 - r1)) for 300 rows, $((r1 - r0)) for 30,000"
+	fi
+done
 is "a scan by column reads the columns the plan names" \
    "SELECT count(*) FROM c1 WHERE a > 10;" "4991"
 
