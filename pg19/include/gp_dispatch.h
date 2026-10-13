@@ -324,7 +324,8 @@ extern void GpDispatchWriteReturning(const char *sql, int content,
 /*
  * COPY ... FROM STDIN on the segments listed, at once: begin with the COPY
  * statement, send each its data in pieces, and end, which answers how many
- * rows each took, in the segments' order.  One COPY at a time.  An error a
+ * rows each took, in the segments' order.  One COPY at a time, which more
+ * segments may be begun for while the first take rows.  An error a
  * segment raises in the data -- the first segment's in their order, where
  * several did -- has its context given to "context", when given, with the
  * segment's content and "arg": what it answers is the error's context here,
@@ -346,14 +347,29 @@ extern void GpCopyInEnd(uint64 *counts);
 extern bool GpCopyInReady(int content);
 extern void GpCopyInWait(void);
 extern bool GpCopyInFailed(void);
+extern uint64 GpCopyInFailedLine(int content);
 extern void GpCopyInStop(int content);
 
 /*
  * On a segment: the COPY the coordinator sends rows for has failed, said in
- * a notice of this SQLSTATE, which no error of PostgreSQL's has.
+ * a notice of this SQLSTATE, which no error of PostgreSQL's has, with the
+ * line of the coordinator's data it failed at, or 0.
  */
 #define GP_COPY_IN_FAILED_STATE	"XXGCF"
-extern void GpCopyInReportFailure(void);
+extern void GpCopyInReportFailure(uint64 line);
+
+/*
+ * On a segment: a COPY of rows the coordinator sends with the lines of its
+ * data they came from (gp_copyin.c) -- the option that asks for it, the
+ * COPY itself, and the line its failure was at.
+ */
+#define GP_COPY_LINES_OPTION	"gp_lines"
+struct Node;
+struct QueryEnvironment;
+extern bool GpCopyInIsRouted(struct Node *parsetree);
+extern uint64 GpCopyInRouted(struct PlannedStmt *pstmt, const char *queryString,
+							 struct QueryEnvironment *queryEnv);
+extern uint64 GpCopyInRoutedFailedLine(void);
 
 /*
  * A query on every segment (content -1) or one: the first column of each

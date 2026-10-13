@@ -5654,7 +5654,9 @@ motion_copy_fault_utility(PlannedStmt *pstmt, const char *queryString,
 	/*
 	 * ... and where the part fails, the coordinator is told now, while it
 	 * still sends rows: the error itself it has only once it has sent them
-	 * all (GpCopyInReportFailure(), gp_dispatch.c).
+	 * all (GpCopyInReportFailure(), gp_dispatch.c).  A COPY's rows came
+	 * with the lines of its data, and the one that failed is said too
+	 * (gp_copyin.c).
 	 */
 	PG_TRY();
 	{
@@ -5668,7 +5670,8 @@ motion_copy_fault_utility(PlannedStmt *pstmt, const char *queryString,
 	PG_CATCH();
 	{
 		if (routed)
-			GpCopyInReportFailure();
+			GpCopyInReportFailure(GpCopyInIsRouted(parsetree) ?
+								  GpCopyInRoutedFailedLine() : 0);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();

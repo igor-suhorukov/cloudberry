@@ -32,8 +32,20 @@
  * Then they go to every segment at once, where no INSERT into the table
  * waits for another -- or else one segment after another, so that two
  * statements cannot wait for each other on different segments
- * (router_sends_at_once()).  COPY FROM routes its rows the same way, parsed
- * by PostgreSQL's own COPY.
+ * (router_sends_at_once()).
+ *
+ * COPY FROM routes its rows the same way, parsed by PostgreSQL's own COPY.
+ * Its data comes from the client, a file or a program, and no segment: so
+ * where the rows may go to every segment at once they go as they are read,
+ * each segment's COPY begun with its first rows, as Cloudberry's COPY sends
+ * each row as it parses it (cdbCopySendData(), cdbcopy.c) -- and nothing of
+ * the data is kept here but a piece a segment.  Each row goes with its line
+ * in the data, which the segment says where the row fails there
+ * (gp_copyin.c).  Where the rows must go one segment after another they
+ * are held until the data is read, as an INSERT's; and where a value the
+ * COPY computes for a row might itself run a query -- a DEFAULT or a
+ * domain's CHECK that calls a function not written in C -- for which the
+ * segments' connections must be free (copy_may_query()).
  *
  * UPDATE and DELETE.  A statement whose rows are all on the segment where the
  * row it changes is -- it reads the table it changes, and nothing else but
@@ -82,6 +94,7 @@
 #include "catalog/pg_class.h"
 #include "catalog/pg_index.h"
 #include "catalog/pg_inherits.h"
+#include "catalog/pg_language.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_trigger.h"
 #include "catalog/pg_type.h"
@@ -118,6 +131,7 @@
 #include "utils/ruleutils.h"
 #include "utils/syscache.h"
 #include "utils/tuplestore.h"
+#include "utils/typcache.h"
 
 #include "gp_cluster.h"
 #include "gp_core_api.h"
@@ -143,6 +157,21 @@ static query_lockmode_hook_type prev_query_lockmode = NULL;
 /* The router: rows to the segments their keys name                          */
 /* ------------------------------------------------------------------------- */
 
+/*
+ * A segment's rows on their way as they are read (router_stream_row()): the
+ * piece of them being filled, as that segment's COPY reads them; a
+ * replicated table has one of these for all its segments.
+ */
+typedef struct RouterSeg
+{
+	bool		any;			/* it has been put a row */
+	bool		begun;			/* the segment's COPY is begun */
+	StringInfoData buf;			/* the piece */
+	StringInfoData lines;		/* its rows' lines (router_put_line()) */
+	uint32		nrows;			/* rows in the piece */
+	uint64		lastline;		/* the line of the last row put */
+} RouterSeg;
+
 typedef struct GpRouter
 {
 	Relation	rel;
@@ -158,14 +187,33 @@ typedef struct GpRouter
 	uint64		nrows;
 
 	/*
-	 * A COPY's: each row's line in the data, kept after its columns, and
-	 * the line of the one a segment failed at (router_error_context()).
+	 * A COPY's: each row's line in the data, kept after its columns and
+	 * sent with the row, which the segment says where a row fails there
+	 * (gp_copyin.c, router_error_context()).
 	 */
 	bool		lines;
 	Datum	   *linevalues;
 	bool	   *linenulls;
 	CopyFromState cstate;
 	uint64		error_lineno;
+
+	/*
+	 * The segments are being talked to: an error is theirs, not one of the
+	 * line the COPY is reading (router_copy_context()).
+	 */
+	bool		sending;
+
+	/*
+	 * A COPY's rows may go as they are read, where reading them runs
+	 * nothing on the segments (copy_may_query()); whether they do is
+	 * decided once it has read a piece's worth of its data
+	 * (router_decide()).  Then each segment's go through its "segs".
+	 */
+	bool		may_stream;
+	bool		decided;
+	bool		streaming;
+	RouterSeg  *segs;
+	MemoryContext rowcxt;		/* a row's values as text or bytes, per row */
 
 	/*
 	 * An INSERT of one row reaches the segment it routes the row to, which
@@ -253,6 +301,10 @@ router_begin(Relation rel, GpPolicy *policy, bool lines)
 	r->replicated = GpPolicyIsReplicated(policy);
 	r->binary = GpTupleDescHasBinaryIO(tupdesc);
 	r->stores = palloc0_array(Tuplestorestate *, r->nsegs);
+	r->segs = palloc0_array(RouterSeg, r->nsegs);
+	r->rowcxt = AllocSetContextCreate(CurrentMemoryContext,
+									  "gp_core routed row",
+									  ALLOCSET_DEFAULT_SIZES);
 	r->lines = lines;
 	r->storedesc = tupdesc;
 	if (lines)
@@ -296,8 +348,14 @@ router_begin(Relation rel, GpPolicy *policy, bool lines)
 			getTypeOutputInfo(att->atttypid, &func, &isvarlena);
 		fmgr_info(func, &r->out[i]);
 	}
-	appendStringInfo(&sql, "%s FROM STDIN%s", first ? "" : ")",
-					 r->binary ? " (FORMAT binary)" : "");
+	appendStringInfo(&sql, "%s FROM STDIN", first ? "" : ")");
+	/* a COPY's rows come with their lines: the segment's gp_copyin.c */
+	if (r->binary && lines)
+		appendStringInfoString(&sql, " (FORMAT binary, " GP_COPY_LINES_OPTION ")");
+	else if (r->binary)
+		appendStringInfoString(&sql, " (FORMAT binary)");
+	else if (lines)
+		appendStringInfoString(&sql, " (" GP_COPY_LINES_OPTION ")");
 	/*
 	 * And the client's statement, in the comment a gather's cursor ends
 	 * with, which the segment's log names and its part's phases show
@@ -309,77 +367,15 @@ router_begin(Relation rel, GpPolicy *policy, bool lines)
 	return r;
 }
 
-/* One row, whose values are the relation's columns in order; a COPY's line. */
-static void
-router_put(GpRouter *r, TupleTableSlot *slot, uint64 lineno)
-{
-	int			seg;
-	int			natts = RelationGetDescr(r->rel)->natts;
-
-	slot_getallattrs(slot);
-	seg = GpHashSegment(r->hash, slot->tts_values, slot->tts_isnull);
-	if (seg == GP_HASH_ALL_SEGMENTS)
-		seg = 0;				/* one copy, sent to every segment */
-
-	if (r->stores[seg] == NULL)
-	{
-		MemoryContext oldcxt = MemoryContextSwitchTo(GetMemoryChunkContext(r));
-
-		/*
-		 * work_mem is the statement's for its rows on their way, not each
-		 * segment's: a store has its part of it, and a replicated table's
-		 * one store the whole.  64 kB is the least work_mem itself can be.
-		 */
-		r->stores[seg] = tuplestore_begin_heap(false, false,
-											   r->replicated ? work_mem
-											   : Max(work_mem / r->nsegs, 64));
-		MemoryContextSwitchTo(oldcxt);
-	}
-	if (r->lines)
-	{
-		memcpy(r->linevalues, slot->tts_values, natts * sizeof(Datum));
-		memcpy(r->linenulls, slot->tts_isnull, natts * sizeof(bool));
-		r->linevalues[natts] = Int64GetDatum((int64) lineno);
-		r->linenulls[natts] = false;
-		tuplestore_putvalues(r->stores[seg], r->storedesc,
-							 r->linevalues, r->linenulls);
-	}
-	else
-		tuplestore_putvalues(r->stores[seg], r->storedesc,
-							 slot->tts_values, slot->tts_isnull);
-	r->nrows++;
-}
-
-/* The line in the data of the n-th row sent to a segment, or 0. */
-static uint64
-router_line(GpRouter *r, int content, uint64 n)
-{
-	Tuplestorestate *store;
-	bool		isnull;
-	Datum		d;
-
-	if (!r->lines || n < 1 || content < 0 || content >= r->nsegs)
-		return 0;
-	store = r->stores[r->replicated ? 0 : content];
-	if (store == NULL)
-		return 0;
-	tuplestore_rescan(store);
-	if ((n > 1 && !tuplestore_skiptuples(store, n - 1, true)) ||
-		!tuplestore_gettupleslot(store, true, false, r->slot))
-		return 0;
-	d = slot_getattr(r->slot, RelationGetDescr(r->rel)->natts + 1, &isnull);
-	return isnull ? 0 : (uint64) DatumGetInt64(d);
-}
-
 /*
  * The context of an error a segment raised in the rows routed to it.  Its
  * last line is the segment's COPY's -- "COPY t, line n", the segment's
  * count of the rows it was sent -- which is no line of the statement's: an
  * INSERT's error says none, as Cloudberry's does, whose segments insert the
  * rows themselves, and a COPY's the line of its data the row came from
- * (router_copy_context()).  The rest -- a trigger's, a function's -- stays.
- * The segment's words are PostgreSQL's untranslated; a line in another
- * language is left as it is.
+ * (router_copy_context()), which the segment said as it failed.  The rest --
+ * a trigger's, a function's -- stays.  The segment's words are PostgreSQL's
+ * untranslated; a line in another language is left as it is.
  */
 static char *
 router_error_context(int content, const char *context, void *arg)
@@ -395,16 +391,17 @@ router_error_context(int content, const char *context, void *arg)
 	if (strncmp(last, "COPY ", 5) != 0 || strncmp(last + 5, relname, rlen) != 0 ||
 		(*after != '\0' && *after != ',' && *after != ':'))
 		return pstrdup(context);
-	if (strncmp(after, ", line ", 7) == 0)
-		r->error_lineno = router_line(r, content,
-									  strtou64(after + 7, NULL, 10));
+	if (r->lines && strncmp(after, ", line ", 7) == 0)
+		r->error_lineno = GpCopyInFailedLine(content);
 	return last == context ? NULL : pnstrdup(context, last - context - 1);
 }
 
 /*
- * The COPY's own context, for an error a segment raised in a row routed
- * there: the line of the data the row came from, as COPY says where it
- * failed (CopyFromErrorCallback()).
+ * The COPY's own context: where it is in its data, as COPY says where it
+ * failed (CopyFromErrorCallback()) -- or, for an error a segment raised in
+ * a row routed there, the line of the data that row came from.  While the
+ * segments are talked to an error is theirs or of the way to them, and no
+ * line's but that one.
  */
 static void
 router_copy_context(void *arg)
@@ -412,12 +409,17 @@ router_copy_context(void *arg)
 	GpRouter   *r = (GpRouter *) arg;
 	CopyFromState cstate = r->cstate;
 
-	if (r->error_lineno == 0 || cstate == NULL)
+	if (cstate == NULL)
 		return;
-	cstate->cur_lineno = r->error_lineno;
-	cstate->line_buf_valid = false;
-	cstate->cur_attname = NULL;
-	cstate->relname_only = false;
+	if (r->sending)
+	{
+		if (r->error_lineno == 0)
+			return;
+		cstate->cur_lineno = r->error_lineno;
+		cstate->line_buf_valid = false;
+		cstate->cur_attname = NULL;
+		cstate->relname_only = false;
+	}
 	CopyFromErrorCallback(cstate);
 }
 
@@ -503,25 +505,280 @@ router_encode(GpRouter *r, TupleTableSlot *slot, StringInfo buf)
 		appendStringInfoChar(buf, '\n');
 }
 
+/* What a segment's rows as they are read are in: a replicated table's, one. */
+static inline RouterSeg *
+router_seg(GpRouter *r, int seg)
+{
+	return &r->segs[r->replicated ? 0 : seg];
+}
+
+/* A row's line onto a piece's: the difference, zigzag, seven bits a byte. */
+static void
+router_put_line(StringInfo lines, uint64 *lastline, uint64 lineno)
+{
+	int64		delta = (int64) (lineno - *lastline);
+	uint64		v = ((uint64) delta << 1) ^ (uint64) (delta >> 63);
+
+	do
+	{
+		unsigned char b = v & 0x7F;
+
+		v >>= 7;
+		appendStringInfoChar(lines, v != 0 ? (b | 0x80) : b);
+	} while (v != 0);
+	*lastline = lineno;
+}
+
+/* The start of a segment's data: a binary COPY's signature. */
+static void
+router_open_data(GpRouter *r, StringInfo buf)
+{
+	if (!r->binary)
+		return;
+	/* PGCOPY\n\377\r\n\0, no flags, no header extension */
+	appendBinaryStringInfo(buf, "PGCOPY\n\377\r\n\0", 11);
+	pq_sendint32(buf, 0);
+	pq_sendint32(buf, 0);
+}
+
+/*
+ * A piece, made: a COPY's ends with its rows' lines, how many rows they
+ * are, and how many bytes the lines take, as gp_copyin.c reads them.
+ */
+static void
+router_close_piece(GpRouter *r, StringInfo buf, StringInfo lines, uint32 nrows)
+{
+	if (!r->lines)
+		return;
+	appendBinaryStringInfo(buf, lines->data, lines->len);
+	pq_sendint32(buf, nrows);
+	pq_sendint32(buf, lines->len);
+}
+
+/*
+ * A COPY whose rows go as they are read has met a segment whose COPY
+ * failed: nothing more is read or sent.  The COPYs are ended, every other
+ * segment's as stopped short of its rows, and the end raises the error.
+ */
+pg_noreturn static void
+router_stream_fail(GpRouter *r)
+{
+	uint64	   *counts = palloc0_array(uint64, r->nsegs);
+
+	for (int seg = 0; seg < r->nsegs; seg++)
+		if (router_seg(r, seg)->begun)
+			GpCopyInStop(seg);
+	GpCopyInEnd(counts);
+	elog(ERROR, "a segment said the rows sent to it had failed, and raised no error");
+}
+
+/*
+ * Send a segment's piece now -- a replicated table's to every segment --
+ * and begin the next: the segment's COPY is begun with its first piece,
+ * and the piece waits until the last one sent there has left, so that no
+ * more is held here than a piece a segment, and a segment that reads
+ * slowly slows the reading of the data to what it takes, as Cloudberry's
+ * COPY is slowed by a segment it cannot send to (cdbCopySendData(),
+ * cdbcopy.c).
+ */
+static void
+router_stream_piece(GpRouter *r, int seg)
+{
+	RouterSeg  *rs = router_seg(r, seg);
+	int			first = r->replicated ? 0 : seg;
+	int			last = r->replicated ? r->nsegs - 1 : seg;
+	bool		was_sending = r->sending;
+	bool		ready;
+
+	router_close_piece(r, &rs->buf, &rs->lines, rs->nrows);
+
+	r->sending = true;
+	/* not one more segment's COPY for rows that have failed on another */
+	if (GpCopyInFailed())
+		router_stream_fail(r);
+	if (!rs->begun)
+	{
+		int		   *segs = palloc_array(int, last - first + 1);
+
+		for (int s = first; s <= last; s++)
+			segs[s - first] = s;
+		GpCopyInBegin(segs, last - first + 1, r->copy_sql,
+					  router_error_context, r);
+		pfree(segs);
+		rs->begun = true;
+	}
+
+	for (;;)
+	{
+		if (GpCopyInFailed())
+			router_stream_fail(r);
+		ready = true;
+		for (int s = first; s <= last && ready; s++)
+			ready = GpCopyInReady(s);
+		if (ready)
+			break;
+		GpCopyInWait();
+	}
+	for (int s = first; s <= last; s++)
+		GpCopyInData(s, rs->buf.data, rs->buf.len);
+	r->sending = was_sending;
+
+	resetStringInfo(&rs->buf);
+	resetStringInfo(&rs->lines);
+	rs->nrows = 0;
+}
+
+/*
+ * One row on its way now: onto its segment's piece, as COPY reads it, and
+ * the piece sent when it has filled.  The slot is the table's columns, and
+ * after them, of a row that was held (router_decide()), its line.
+ */
+static void
+router_stream_row(GpRouter *r, int seg, TupleTableSlot *slot, uint64 lineno)
+{
+	RouterSeg  *rs = router_seg(r, seg);
+	MemoryContext oldcxt;
+
+	if (!rs->any)
+	{
+		oldcxt = MemoryContextSwitchTo(GetMemoryChunkContext(r));
+		initStringInfo(&rs->buf);
+		initStringInfo(&rs->lines);
+		MemoryContextSwitchTo(oldcxt);
+		router_open_data(r, &rs->buf);
+		rs->any = true;
+	}
+
+	/* what its columns' output functions leave goes with the row */
+	oldcxt = MemoryContextSwitchTo(r->rowcxt);
+	router_encode(r, slot, &rs->buf);
+	MemoryContextSwitchTo(oldcxt);
+	MemoryContextReset(r->rowcxt);
+
+	if (r->lines)
+		router_put_line(&rs->lines, &rs->lastline, lineno);
+	rs->nrows++;
+
+	if (rs->buf.len >= ROUTE_CHUNK)
+		router_stream_piece(r, seg);
+}
+
+/*
+ * A COPY has read a piece's worth of its data, and its rows may go as they
+ * are read (copy_may_query()): do they?  Where they may go to every segment
+ * at once (router_sends_at_once()), or there is one segment.  Then the rows
+ * held so far are sent on, and every row after them as it is put.
+ * Otherwise they are held to the data's end, as an INSERT's are until its
+ * plan has finished with the segments, and go one segment after another.
+ *
+ * A COPY of less data than that decides nothing: its rows go as it ends,
+ * as they went, to the segments it has rows for and no other.
+ */
+static void
+router_decide(GpRouter *r)
+{
+	int			natts = RelationGetDescr(r->rel)->natts;
+
+	r->decided = true;
+	if (r->nsegs > 1 && !router_sends_at_once(r->rel))
+		return;
+	r->streaming = true;
+
+	for (int seg = 0; seg < r->nsegs; seg++)
+	{
+		Tuplestorestate *store = r->stores[seg];
+
+		if (store == NULL)
+			continue;
+		tuplestore_rescan(store);
+		while (tuplestore_gettupleslot(store, true, false, r->slot))
+		{
+			bool		isnull;
+			uint64		line = 0;
+
+			slot_getallattrs(r->slot);
+			if (r->lines)
+				line = (uint64) DatumGetInt64(slot_getattr(r->slot, natts + 1, &isnull));
+			router_stream_row(r, seg, r->slot, line);
+		}
+		tuplestore_end(store);
+		r->stores[seg] = NULL;
+	}
+}
+
+/* One row, whose values are the relation's columns in order; a COPY's line. */
+static void
+router_put(GpRouter *r, TupleTableSlot *slot, uint64 lineno)
+{
+	int			seg;
+	int			natts = RelationGetDescr(r->rel)->natts;
+
+	slot_getallattrs(slot);
+	seg = GpHashSegment(r->hash, slot->tts_values, slot->tts_isnull);
+	if (seg == GP_HASH_ALL_SEGMENTS)
+		seg = 0;				/* one copy, sent to every segment */
+	r->nrows++;
+
+	if (r->streaming)
+	{
+		router_stream_row(r, seg, slot, lineno);
+		return;
+	}
+
+	if (r->stores[seg] == NULL)
+	{
+		MemoryContext oldcxt = MemoryContextSwitchTo(GetMemoryChunkContext(r));
+
+		/*
+		 * work_mem is the statement's for its rows on their way, not each
+		 * segment's: a store has its part of it, and a replicated table's
+		 * one store the whole.  64 kB is the least work_mem itself can be.
+		 */
+		r->stores[seg] = tuplestore_begin_heap(false, false,
+											   r->replicated ? work_mem
+											   : Max(work_mem / r->nsegs, 64));
+		MemoryContextSwitchTo(oldcxt);
+	}
+	if (r->lines)
+	{
+		memcpy(r->linevalues, slot->tts_values, natts * sizeof(Datum));
+		memcpy(r->linenulls, slot->tts_isnull, natts * sizeof(bool));
+		r->linevalues[natts] = Int64GetDatum((int64) lineno);
+		r->linenulls[natts] = false;
+		tuplestore_putvalues(r->stores[seg], r->storedesc,
+							 r->linevalues, r->linenulls);
+	}
+	else
+		tuplestore_putvalues(r->stores[seg], r->storedesc,
+							 slot->tts_values, slot->tts_isnull);
+
+	/* its data is past a piece: router_decide() */
+	if (r->may_stream && !r->decided &&
+		r->cstate->bytes_processed > ROUTE_CHUNK)
+		router_decide(r);
+}
+
 /*
  * A piece more of a store's rows, as COPY reads them, in buf; false once the
- * store has no more after it.  "first" is its first piece.
+ * store has no more after it.  "first" is its first piece.  A COPY's rows'
+ * lines end the piece (router_close_piece()), counted on from *lastline.
  */
 static bool
 router_next_piece(GpRouter *r, Tuplestorestate *store, bool first,
-				  StringInfo buf, MemoryContext rowcxt)
+				  StringInfo buf, StringInfo lines, uint64 *lastline,
+				  MemoryContext rowcxt)
 {
+	int			natts = RelationGetDescr(r->rel)->natts;
+	uint32		nrows = 0;
+	bool		more = true;
+
 	resetStringInfo(buf);
+	resetStringInfo(lines);
 	if (first)
 	{
 		tuplestore_rescan(store);
-		if (r->binary)
-		{
-			/* PGCOPY\n\377\r\n\0, no flags, no header extension */
-			appendBinaryStringInfo(buf, "PGCOPY\n\377\r\n\0", 11);
-			pq_sendint32(buf, 0);
-			pq_sendint32(buf, 0);
-		}
+		*lastline = 0;
+		router_open_data(r, buf);
 	}
 
 	while (buf->len < ROUTE_CHUNK)
@@ -532,14 +789,25 @@ router_next_piece(GpRouter *r, Tuplestorestate *store, bool first,
 		{
 			if (r->binary)
 				pq_sendint16(buf, -1);
-			return false;
+			more = false;
+			break;
 		}
 		oldcxt = MemoryContextSwitchTo(rowcxt);
 		router_encode(r, r->slot, buf);
 		MemoryContextSwitchTo(oldcxt);
 		MemoryContextReset(rowcxt);
+		if (r->lines)
+		{
+			bool		isnull;
+
+			router_put_line(lines, lastline,
+							(uint64) DatumGetInt64(slot_getattr(r->slot, natts + 1, &isnull)));
+		}
+		nrows++;
 	}
-	return true;
+	if (buf->len > 0)
+		router_close_piece(r, buf, lines, nrows);
+	return more;
 }
 
 /* Can every segment a store's rows go to be given a piece more? */
@@ -555,13 +823,13 @@ router_ready(GpRouter *r, const int *segs, int nsegs, int i)
 }
 
 /*
- * Send the segments listed their rows, all of them at once: a piece of each
- * segment's as that segment can take one, so that each loads while the
- * others are sent theirs, and the statement takes its slowest segment's
- * time, not their times together -- nor does a segment that reads slowly
- * hold back the rows of the others.  A replicated table's rows are one
- * store's, each piece of which goes to every segment listed, as the slowest
- * of them takes it.  Answer how many rows the segments took; of a
+ * Send the segments listed the rows held for them, all of them at once: a
+ * piece of each segment's as that segment can take one, so that each loads
+ * while the others are sent theirs, and the statement takes its slowest
+ * segment's time, not their times together -- nor does a segment that reads
+ * slowly hold back the rows of the others.  A replicated table's rows are
+ * one store's, each piece of which goes to every segment listed, as the
+ * slowest of them takes it.  Answer how many rows the segments took; of a
  * replicated table, how many one of them did.
  *
  * Once a segment says its COPY has failed, nothing more is sent: the COPYs
@@ -576,18 +844,18 @@ router_send(GpRouter *r, const int *segs, int nsegs)
 	int			nstores = r->replicated ? 1 : nsegs;
 	bool	   *more = palloc_array(bool, nstores);
 	bool	   *begun = palloc0_array(bool, nstores);
+	uint64	   *lastline = palloc0_array(uint64, nstores);
 	uint64	   *counts = palloc0_array(uint64, nsegs);
 	uint64		total = 0;
 	bool		any;
 	bool		failed = false;
 	StringInfoData buf;
-	MemoryContext rowcxt = AllocSetContextCreate(CurrentMemoryContext,
-												 "gp_core routed row",
-												 ALLOCSET_DEFAULT_SIZES);
+	StringInfoData lines;
 
 	GpCopyInBegin(segs, nsegs, r->copy_sql, router_error_context, r);
 
 	initStringInfo(&buf);
+	initStringInfo(&lines);
 	memset(more, true, nstores * sizeof(bool));
 	do
 	{
@@ -602,7 +870,8 @@ router_send(GpRouter *r, const int *segs, int nsegs)
 			if (!router_ready(r, segs, nsegs, i))
 				continue;
 			more[i] = router_next_piece(r, r->stores[r->replicated ? 0 : segs[i]],
-										!begun[i], &buf, rowcxt);
+										!begun[i], &buf, &lines, &lastline[i],
+										r->rowcxt);
 			begun[i] = true;
 			sent = true;
 			if (buf.len > 0)
@@ -633,7 +902,7 @@ router_send(GpRouter *r, const int *segs, int nsegs)
 	}
 
 	pfree(buf.data);
-	MemoryContextDelete(rowcxt);
+	pfree(lines.data);
 	GpCopyInEnd(counts);
 
 	for (int i = 0; i < nsegs; i++)
@@ -641,15 +910,17 @@ router_send(GpRouter *r, const int *segs, int nsegs)
 	pfree(counts);
 	pfree(more);
 	pfree(begun);
+	pfree(lastline);
 	return total;
 }
 
 /*
- * Send every segment its rows; answer how many rows the statement wrote:
- * those the segments took, which a BEFORE row trigger that answers NULL
- * leaves fewer than were sent, as PostgreSQL's INSERT and COPY count them.
- * Every segment takes a replicated table's every row, and the statement
- * wrote each once.
+ * The statement has no more rows.  Send every segment its own -- what is
+ * left of them, where they went as they were read; answer how many rows the
+ * statement wrote: those the segments took, which a BEFORE row trigger that
+ * answers NULL leaves fewer than were sent, as PostgreSQL's INSERT and COPY
+ * count them.  Every segment takes a replicated table's every row, and the
+ * statement wrote each once.
  */
 static uint64
 router_finish(GpRouter *r)
@@ -657,6 +928,36 @@ router_finish(GpRouter *r)
 	int		   *segs = palloc_array(int, r->nsegs);
 	int			nsegs = 0;
 	uint64		total = 0;
+
+	r->sending = true;
+
+	/* Gone as they were read: each segment's last piece, and the end. */
+	if (r->streaming)
+	{
+		uint64	   *counts = palloc0_array(uint64, r->nsegs);
+
+		for (int seg = 0; seg < (r->replicated ? 1 : r->nsegs); seg++)
+		{
+			RouterSeg  *rs = &r->segs[seg];
+
+			if (!rs->any)
+				continue;
+			if (r->binary)
+				pq_sendint16(&rs->buf, -1);
+			if (rs->buf.len > 0)
+				router_stream_piece(r, seg);
+		}
+		for (int seg = 0; seg < r->nsegs; seg++)
+			if (router_seg(r, seg)->any)
+				nsegs++;
+		if (GpCopyInFailed())
+			router_stream_fail(r);
+		GpCopyInEnd(counts);
+		for (int i = 0; i < nsegs; i++)
+			total = r->replicated ? counts[i] : total + counts[i];
+		pfree(counts);
+		return total;
+	}
 
 	for (int seg = 0; seg < r->nsegs; seg++)
 		if (r->stores[r->replicated ? 0 : seg] != NULL)
@@ -689,6 +990,7 @@ router_end(GpRouter *r)
 		if (r->stores[seg] != NULL)
 			tuplestore_end(r->stores[seg]);
 	ExecDropSingleTupleTableSlot(r->slot);
+	MemoryContextDelete(r->rowcxt);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -2059,8 +2361,8 @@ copy_end_sreh(CopySreh *sreh)
  * table or its columns, through ExecCheckPermissions() and so through its
  * hook, where diskquota refuses a load into a table over its quota.
  */
-static void
-copy_from_check_permissions(ParseState *pstate, CopyStmt *stmt, Relation rel)
+void
+GpCopyFromCheckPermissions(ParseState *pstate, CopyStmt *stmt, Relation rel)
 {
 	ParseNamespaceItem *nsitem;
 	RTEPermissionInfo *perminfo;
@@ -2087,7 +2389,7 @@ copy_from_local_sreh(ParseState *pstate, CopyStmt *stmt, Relation rel,
 	CopyFromState cstate;
 	uint64		processed;
 
-	copy_from_check_permissions(pstate, stmt, rel);
+	GpCopyFromCheckPermissions(pstate, stmt, rel);
 	if (check_enable_rls(RelationGetRelid(rel), InvalidOid, false) == RLS_ENABLED)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -2104,12 +2406,161 @@ copy_from_local_sreh(ParseState *pstate, CopyStmt *stmt, Relation rel,
 }
 
 /*
+ * Might calling this function run a query?  One of a procedural language
+ * might, and one of SQL's that the planner left a call.  One built in or
+ * written in C is taken not to -- but for PostgreSQL's own that run a query
+ * they are given, or read a table they are named: the functions that map
+ * tables and queries to XML, and the two of text search.  An extension's
+ * function in C that runs a query on the segments is not known here, and
+ * is refused if it does it while a COPY's rows go there (conn_still_busy(),
+ * gp_dispatch.c).
+ */
+static bool
+copy_function_may_query(Oid funcid, void *context)
+{
+	HeapTuple	tuple;
+	Oid			lang;
+
+	switch (funcid)
+	{
+		case F_TABLE_TO_XML:
+		case F_QUERY_TO_XML:
+		case F_CURSOR_TO_XML:
+		case F_TABLE_TO_XMLSCHEMA:
+		case F_QUERY_TO_XMLSCHEMA:
+		case F_CURSOR_TO_XMLSCHEMA:
+		case F_TABLE_TO_XML_AND_XMLSCHEMA:
+		case F_QUERY_TO_XML_AND_XMLSCHEMA:
+		case F_SCHEMA_TO_XML:
+		case F_SCHEMA_TO_XMLSCHEMA:
+		case F_SCHEMA_TO_XML_AND_XMLSCHEMA:
+		case F_DATABASE_TO_XML:
+		case F_DATABASE_TO_XMLSCHEMA:
+		case F_DATABASE_TO_XML_AND_XMLSCHEMA:
+		case F_TS_REWRITE_TSQUERY_TEXT:
+		case F_TS_STAT_TEXT:
+		case F_TS_STAT_TEXT_TEXT:
+			return true;
+		default:
+			break;
+	}
+
+	tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(funcid));
+	if (!HeapTupleIsValid(tuple))
+		return true;
+	lang = ((Form_pg_proc) GETSTRUCT(tuple))->prolang;
+	ReleaseSysCache(tuple);
+	return lang != INTERNALlanguageId && lang != ClanguageId;
+}
+
+static bool copy_type_may_query(Oid typid, int depth);
+
+static bool
+copy_expr_may_query(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (check_functions_in_node(node, copy_function_may_query, context))
+		return true;
+	if (IsA(node, SubLink) || IsA(node, SubPlan) || IsA(node, AlternativeSubPlan))
+		return true;
+	if (IsA(node, CoerceToDomain) &&
+		copy_type_may_query(((CoerceToDomain *) node)->resulttype, 0))
+		return true;
+	if (IsA(node, CoerceViaIO) &&
+		copy_type_may_query(((CoerceViaIO *) node)->resulttype, 0))
+		return true;
+	return expression_tree_walker(node, copy_expr_may_query, context);
+}
+
+/*
+ * Might reading a value of this type run a query: a domain whose CHECK
+ * might, or a type with one inside -- an array's elements, a composite's
+ * columns, a range's bounds.
+ */
+static bool
+copy_type_may_query(Oid typid, int depth)
+{
+	Oid			elem;
+
+	if (depth > 16)
+		return true;
+	switch (get_typtype(typid))
+	{
+		case TYPTYPE_DOMAIN:
+			{
+				DomainConstraintRef *ref = palloc_object(DomainConstraintRef);
+
+				/* its own constraints and those of the domains under it */
+				InitDomainConstraintRef(typid, ref, CurrentMemoryContext, false);
+				foreach_node(DomainConstraintState, con, ref->constraints)
+					if (con->check_expr != NULL &&
+						copy_expr_may_query((Node *) con->check_expr, NULL))
+						return true;
+				return copy_type_may_query(getBaseType(typid), depth + 1);
+			}
+		case TYPTYPE_COMPOSITE:
+			{
+				TupleDesc	tupdesc = lookup_rowtype_tupdesc(typid, -1);
+				bool		may = false;
+
+				for (int i = 0; i < tupdesc->natts && !may; i++)
+					may = !TupleDescAttr(tupdesc, i)->attisdropped &&
+						copy_type_may_query(TupleDescAttr(tupdesc, i)->atttypid,
+											depth + 1);
+				ReleaseTupleDesc(tupdesc);
+				return may;
+			}
+		case TYPTYPE_RANGE:
+			return copy_type_may_query(get_range_subtype(typid), depth + 1);
+		case TYPTYPE_MULTIRANGE:
+			return copy_type_may_query(get_multirange_range(typid), depth + 1);
+		default:
+			elem = get_element_type(typid);
+			return OidIsValid(elem) && copy_type_may_query(elem, depth + 1);
+	}
+}
+
+/*
+ * Might reading the COPY's data run a query?  Its rows go to the segments
+ * as they are read only if not: a query of a distributed table needs the
+ * connections the rows are going over, and a connection in COPY mode takes
+ * nothing else.  What is computed for a row here is the DEFAULT of each
+ * column the data leaves out -- or of any, with COPY's DEFAULT option --
+ * and each value read, by its type's input function, which for a domain
+ * checks its constraints.  A function of a procedural language, or in SQL
+ * and not inlined, might read a table; nextval() takes the sequence here.
+ */
+static bool
+copy_may_query(CopyFromState cstate, Relation rel)
+{
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+
+	for (int i = 0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(tupdesc, i);
+
+		if (att->attisdropped)
+			continue;
+		if (cstate->defexprs[i] != NULL &&
+			copy_expr_may_query((Node *) cstate->defexprs[i]->expr, NULL))
+			return true;
+		if (list_member_int(cstate->attnumlist, i + 1) &&
+			copy_type_may_query(att->atttypid, 0))
+			return true;
+	}
+	return false;
+}
+
+/*
  * COPY t FROM: parsed by PostgreSQL's own COPY, as it would be into a local
- * table, and routed.  The coordinator evaluates the defaults, as for INSERT,
- * so that a serial column has one sequence.  With Cloudberry's options, read
- * through gp_exttable's filter (above).  An error in the data says where, as
- * COPY's own does, and so does one a segment raises in a row routed there
- * (router_error_context()): the line of the data the row came from.
+ * table, and routed -- each row as it is read, where the router sends them
+ * so (router_decide()).  The coordinator evaluates the defaults, as for
+ * INSERT, so that a serial column has one sequence.  With Cloudberry's
+ * options, read through gp_exttable's filter (above).  An error in the data
+ * says where, as COPY's own does, and so does one a segment raises in a row
+ * routed there (router_copy_context()): the line of the data the row came
+ * from.
  */
 static uint64
 copy_from_distributed(ParseState *pstate, CopyStmt *stmt, Relation rel,
@@ -2120,7 +2571,8 @@ copy_from_distributed(ParseState *pstate, CopyStmt *stmt, Relation rel,
 	TupleTableSlot *slot;
 	ExprContext *econtext;
 	EState	   *estate = CreateExecutorState();
-	ErrorContextCallback errcallback;
+	ErrorContextCallback readcallback;
+	ErrorContextCallback routecallback;
 	uint64		processed;
 
 	if (sreh != NULL)
@@ -2130,15 +2582,25 @@ copy_from_distributed(ParseState *pstate, CopyStmt *stmt, Relation rel,
 							   NULL, stmt->attlist, stmt->options);
 	router = router_begin(rel, policy, true);
 	router->cstate = cstate;
+	router->may_stream = !copy_may_query(cstate, rel);
 	/* Cloudberry's COPY is sent to every segment of the table */
 	GpReportDtxReached(NULL, NULL, policy->numsegments);
 	slot = MakeSingleTupleTableSlot(RelationGetDescr(rel), &TTSOpsVirtual);
 	econtext = GetPerTupleExprContext(estate);
 
-	errcallback.callback = CopyFromErrorCallback;
-	errcallback.arg = cstate;
-	errcallback.previous = error_context_stack;
-	error_context_stack = &errcallback;
+	/*
+	 * A row is read under COPY's own context, by its own name: the filter
+	 * knows it by that, and leaves it out of an error of its own reading
+	 * (loader_read(), copysreh.c).  And routed under the router's, which is
+	 * that one until the row is on its way to a segment.
+	 */
+	readcallback.callback = CopyFromErrorCallback;
+	readcallback.arg = cstate;
+	readcallback.previous = error_context_stack;
+	routecallback.callback = router_copy_context;
+	routecallback.arg = router;
+	routecallback.previous = error_context_stack;
+	error_context_stack = &routecallback;
 	for (;;)
 	{
 		MemoryContext oldcxt;
@@ -2153,22 +2615,18 @@ copy_from_distributed(ParseState *pstate, CopyStmt *stmt, Relation rel,
 		 * computes a column's DEFAULT, as CopyFrom() calls it: gone with
 		 * the next row, once the router has sent this one on.
 		 */
+		error_context_stack = &readcallback;
 		oldcxt = MemoryContextSwitchTo(GetPerTupleMemoryContext(estate));
 		got = NextCopyFrom(cstate, econtext, slot->tts_values, slot->tts_isnull);
 		MemoryContextSwitchTo(oldcxt);
+		error_context_stack = &routecallback;
 		if (!got)
 			break;
 		ExecStoreVirtualTuple(slot);
 		router_put(router, slot, cstate->cur_lineno);
 	}
-	error_context_stack = errcallback.previous;
-
-	errcallback.callback = router_copy_context;
-	errcallback.arg = router;
-	errcallback.previous = error_context_stack;
-	error_context_stack = &errcallback;
 	processed = router_finish(router);
-	error_context_stack = errcallback.previous;
+	error_context_stack = routecallback.previous;
 
 	EndCopyFrom(cstate);
 	router_end(router);
@@ -2337,6 +2795,16 @@ gp_modify_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	CopySreh	sreh_data;
 	CopySreh   *sreh = NULL;
 
+	/* a segment's COPY of rows the coordinator sends with their lines */
+	if (GpClusterIsDispatched() && GpCopyInIsRouted(parsetree))
+	{
+		uint64		processed = GpCopyInRouted(pstmt, queryString, queryEnv);
+
+		if (qc)
+			SetQueryCompletion(qc, CMDTAG_COPY, processed);
+		return;
+	}
+
 	/* Cloudberry's options, carried by the grammar or named: copy_take_sreh() */
 	if (IsA(parsetree, CopyStmt) &&
 		copy_cloudberry_option((CopyStmt *) parsetree) != NULL)
@@ -2442,7 +2910,7 @@ gp_modify_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 			 * The lock and the privileges are the ones COPY FROM takes.
 			 */
 			rel = table_open(relid, RowExclusiveLock);
-			copy_from_check_permissions(pstate, stmt, rel);
+			GpCopyFromCheckPermissions(pstate, stmt, rel);
 			if (stmt->filename != NULL && !has_privs_of_role(GetUserId(),
 															 stmt->is_program ? ROLE_PG_EXECUTE_SERVER_PROGRAM : ROLE_PG_READ_SERVER_FILES))
 				ereport(ERROR,

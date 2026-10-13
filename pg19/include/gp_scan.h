@@ -165,6 +165,15 @@ extern void GpModifyLockPartitions(Oid relid, LOCKMODE lockmode);
 extern void GpModifyCheckTarget(Oid relid);
 
 /*
+ * COPY FROM's privileges on its table, as DoCopy() checks them, for a COPY
+ * that does not go through it.
+ */
+struct ParseState;
+struct CopyStmt;
+extern void GpCopyFromCheckPermissions(struct ParseState *pstate,
+									   struct CopyStmt *stmt, Relation rel);
+
+/*
  * ANALYZE of a distributed table through O3, where there is a cluster, and
  * of a partitioned table's leaves, on one node too (gp_analyze.c).
  */

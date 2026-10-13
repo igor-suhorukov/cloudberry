@@ -489,6 +489,7 @@ modules = [
                      'modules/gp_core/gp_legacyhash.c',
                      'modules/gp_core/gp_scan.c',
                      'modules/gp_core/gp_modify.c',
+                     'modules/gp_core/gp_copyin.c',
                      'modules/gp_core/gp_subselect.c',
                      'modules/gp_core/gp_explicit.c',
                      'modules/gp_core/gp_analyze.c',

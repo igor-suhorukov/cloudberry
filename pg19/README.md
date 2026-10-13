@@ -469,14 +469,26 @@ Distributed transactions (M3), in `gp_core`:
   with the same keys never wait for each other on different segments,
   where no segment would see the deadlock.  So a table with a primary key
   loads in its segments' times one after another, and without one, or
-  with the detector, in its slowest segment's.  Until they are sent the
-  rows are held on the coordinator, in `work_mem` for all the segments
-  together and in temporary files past it; a cancel reaches a statement
-  while it sends them.  A piece of the rows goes to whichever segment can
-  take one, so a segment that reads slowly holds back its own rows alone;
-  and a segment whose rows fail says so at once, and the statement ends
-  there, the other segments' parts cancelled, where libpq would say it
-  only once every row had been sent;
+  with the detector, in its slowest segment's.  An INSERT's rows are held
+  on the coordinator until its plan has finished with the segments, in
+  `work_mem` for all the segments together and in temporary files past
+  it.  A COPY's data comes from no segment, so where its rows go at once
+  they go as it reads them, as Cloudberry's do: each segment's COPY begun
+  with its first rows, nothing of the data kept on the coordinator but a
+  piece a segment, and a segment that reads slowly slowing the reading to
+  what it takes.  Not a COPY of 64 kB of data or less, which is sent as
+  it ends; nor one whose rows go one segment after another; nor one
+  that computes a value for a row -- a column's `DEFAULT`, a domain's
+  `CHECK` -- by a function of a procedural language or of SQL, or one of
+  PostgreSQL's own that run a query they are given, `query_to_xml()` and
+  its kin, which might read a table over the connections the rows would
+  be going on: those are held as an INSERT's.  Each row of a COPY travels with its line in the data, and a
+  segment where one fails says the line.  A cancel reaches a statement
+  while it sends rows.  Of rows held, a piece goes to whichever segment
+  can take one, so a segment that reads slowly holds back its own rows
+  alone; and a segment whose rows fail says so at once, and the statement
+  ends there, the other segments' parts cancelled and no more of the data
+  read, where libpq would say it only once every row had been sent;
 - **`SELECT ... FOR UPDATE`** and the other locking clauses: under ORCA as
   under the planner, the rows are locked by a LockRows node — at the top of
   the plan on one node, on the segments below the Gather on a cluster with
