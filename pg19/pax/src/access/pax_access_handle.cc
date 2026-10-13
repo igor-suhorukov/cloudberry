@@ -60,6 +60,8 @@
  *     filter reads: pax_init() registers the method with gp_core's runtime
  *     filters (gp_rtfilter.h), where Cloudberry's scan_flags said
  *     SCAN_SUPPORT_RUNTIME_FILTER;
+ *   - the fault pax_insert is in MultiInsert() too: an INSERT's rows reach a
+ *     segment as a COPY's do where the planner's route sends them;
  *   - the module's magic block and _PG_init are modules/pax/pax.c's, which
  *     calls pax_init() here.
  *
@@ -435,6 +437,13 @@ void CCPaxAccessMethod::MultiInsert(Relation relation, TupleTableSlot **slots,
 
     (void)CPaxDmlStateLocal::Instance()->GetInserter(relation);
     Assert(cbdb::pax_memory_context);
+
+#ifdef FAULT_INJECTOR
+    // TupleInsert()'s fault, where an INSERT's rows reach a segment as a
+    // COPY's do, in batches
+    FaultInjector_InjectFaultIfSet("pax_insert", DDLNotSpecified, "",
+                                   RelationGetRelationName(relation));
+#endif
 
     old_ctx = MemoryContextSwitchTo(cbdb::pax_memory_context);
     CPaxInserter::MultiInsert(relation, slots, ntuples, cid, (int)options,
