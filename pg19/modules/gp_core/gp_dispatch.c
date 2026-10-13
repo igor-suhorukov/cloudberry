@@ -679,6 +679,8 @@ typedef struct GpSegmentConn
 								 * (GpCopyInReportFailure()) */
 	bool		copy_stopped;	/* ... and is to be ended short of its rows
 								 * (GpCopyInStop()) */
+	bool		copy_pending;	/* ... some of what was put had not left when
+								 * last looked at (GpCopyInReady()) */
 
 	/*
 	 * When what is in flight is a gather's next batch, whose it is.  Several
@@ -6072,6 +6074,7 @@ GpCopyInBegin(const int *contents, int ncontents, const char *sql,
 				PQclear(res);
 				c->copying = true;
 				c->copy_failed = c->copy_stopped = false;
+				c->copy_pending = false;
 				ncopying++;
 				continue;
 			}
@@ -6188,9 +6191,11 @@ void
 GpCopyInData(int content, const char *data, int len)
 {
 	GpSegmentConn *c = copy_in_conn(content);
+	int			rc;
 
-	if (PQputCopyData(c->conn, data, len) != 1 || PQflush(c->conn) < 0)
+	if (PQputCopyData(c->conn, data, len) != 1 || (rc = PQflush(c->conn)) < 0)
 		copy_in_send_failed(c, false);
+	c->copy_pending = rc > 0;
 	copy_in_hear(c, false);
 }
 
@@ -6203,12 +6208,19 @@ GpCopyInReady(int content)
 
 	if (rc < 0)
 		copy_in_send_failed(c, false);
+	c->copy_pending = rc > 0;
 	return rc == 0;
 }
 
 /*
  * Wait until a segment the COPY goes to can take more, or has something to
  * say, taking interrupts: for the caller no segment of whose is ready.
+ *
+ * A segment found not ready a moment ago may be ready by the time its
+ * socket is looked at here, the last of its piece gone meanwhile: then
+ * there is nothing to wait for, and waiting -- for a socket that is
+ * writable already to become so is not asked, only for the segment to say
+ * something, which it has no reason to -- would be the wait's whole second.
  */
 void
 GpCopyInWait(void)
@@ -6216,6 +6228,7 @@ GpCopyInWait(void)
 	GpGang	   *g = gang;
 	WaitEventSet *wes;
 	WaitEvent	occurred[1];
+	bool		ready = false;
 
 	Assert(g != NULL && ncopying > 0);
 	wes = CreateWaitEventSet(CurrentResourceOwner, g->nconns + 2);
@@ -6233,11 +6246,15 @@ GpCopyInWait(void)
 			FreeWaitEventSet(wes);
 			copy_in_send_failed(c, false);
 		}
+		if (c->copy_pending && rc == 0)
+			ready = true;
+		c->copy_pending = rc > 0;
 		AddWaitEventToSet(wes,
 						  WL_SOCKET_READABLE | (rc > 0 ? WL_SOCKET_WRITEABLE : 0),
 						  PQsocket(c->conn), NULL, NULL);
 	}
-	(void) WaitEventSetWait(wes, 1000, occurred, 1, dispatch_wait_event());
+	if (!ready)
+		(void) WaitEventSetWait(wes, 1000, occurred, 1, dispatch_wait_event());
 	FreeWaitEventSet(wes);
 	ResetLatch(MyLatch);
 	CHECK_FOR_INTERRUPTS();
