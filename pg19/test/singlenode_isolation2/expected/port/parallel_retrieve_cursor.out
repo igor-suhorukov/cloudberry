@@ -100,7 +100,9 @@ EXPLAIN (COSTS false) DECLARE c2 PARALLEL RETRIEVE CURSOR FOR SELECT * FROM prc_
  Optimizer: GPORCA          
 (5 rows)
 
--- a retrieve session that quits partway cancels the cursor
+-- a retrieve session that quits partway cancels the cursor -- as its backend
+-- ends, which is after the session has gone: the cursor's session waits for
+-- it, where a look at once could come first
 1: BEGIN;
 BEGIN
 1: DECLARE c3 PARALLEL RETRIEVE CURSOR FOR SELECT * FROM prc_t ORDER BY a;
@@ -118,7 +120,7 @@ DECLARE
  5 
 (5 rows)
 -1Rq: ... <quitting>
-1: SELECT * FROM gp_wait_parallel_retrieve_cursor('c3', 0);
+1: SELECT * FROM gp_wait_parallel_retrieve_cursor('c3', 60);
 ERROR:  canceling MPP operation: "Endpoint retrieve session is quitting. All unfinished parallel retrieve cursors on the session will be terminated."
 1: ROLLBACK;
 ROLLBACK

@@ -27,13 +27,15 @@ INSERT INTO prc_t SELECT generate_series(1, 20);
 -- where the endpoint is, as EXPLAIN says it
 EXPLAIN (COSTS false) DECLARE c2 PARALLEL RETRIEVE CURSOR FOR SELECT * FROM prc_t ORDER BY a;
 
--- a retrieve session that quits partway cancels the cursor
+-- a retrieve session that quits partway cancels the cursor -- as its backend
+-- ends, which is after the session has gone: the cursor's session waits for
+-- it, where a look at once could come first
 1: BEGIN;
 1: DECLARE c3 PARALLEL RETRIEVE CURSOR FOR SELECT * FROM prc_t ORDER BY a;
 1: @post_run 'parse_endpoint_info 3 1 2 3 4': SELECT endpointname,auth_token,hostname,port,state FROM gp_get_endpoints() WHERE cursorname='c3';
 -1R: @pre_run 'set_endpoint_variable @ENDPOINT3': RETRIEVE 5 FROM ENDPOINT "@ENDPOINT3";
 -1Rq:
-1: SELECT * FROM gp_wait_parallel_retrieve_cursor('c3', 0);
+1: SELECT * FROM gp_wait_parallel_retrieve_cursor('c3', 60);
 1: ROLLBACK;
 1: SELECT count(*) FROM gp_get_endpoints();
 
