@@ -1032,6 +1032,23 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 		&& ok "a COPY's error, on a segment or here, names the line of its data" \
 		|| notok "a COPY's error context" "$out / $out2"
 
+	# A statement cancelled while its rows travel -- the segments read
+	# slowly, here by a check that sleeps, so the cancel finds rows not yet
+	# sent -- ends its COPY and gives the session back.  The abort once read
+	# a connection still in COPY mode for ever.
+	q 0 "CREATE FUNCTION slow_ok(int) RETURNS bool LANGUAGE plpgsql AS \$\$ BEGIN PERFORM pg_sleep(0.0002); RETURN true; END \$\$;
+	     CREATE TABLE rt_s (k int, v int CHECK (slow_ok(v))) DISTRIBUTED BY (k);
+	     CREATE TABLE rt_sk (k int PRIMARY KEY, v int CHECK (slow_ok(v))) DISTRIBUTED BY (k);" >/dev/null
+	out=
+	for t in rt_s rt_sk; do
+		out="$out$(printf '%s\n' "SET statement_timeout = '1s';" "INSERT INTO $t SELECT i, i FROM generate_series(1, 300000) i;" \
+			"RESET statement_timeout;" "INSERT INTO $t VALUES (1, 1);" "SELECT count(*) FROM $t;" |
+			timeout 120 "$PSQL" -X -q -t -A -h "$(sockdir 0)" -p "$(port 0)" -d postgres -f - 2>&1 | grep -v "^CONTEXT" | sed 's/^psql:<stdin>:[0-9]*: //' | tr '\n' ' ')|"
+	done
+	[ "$out" = "ERROR:  canceling statement due to statement timeout 1 |ERROR:  canceling statement due to statement timeout 1 |" ] \
+		&& ok "a statement cancelled while its rows travel ends, and the session goes on" \
+		|| notok "a cancel while rows travel to the segments" "$out"
+
 	# Cloudberry's options of COPY, which PostgreSQL's has not, through
 	# gp_exttable's filter: FILL MISSING FIELDS, NEWLINE, and text's ESCAPE,
 	# from the client, a file and a program; and a row no partition takes,

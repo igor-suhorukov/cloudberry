@@ -746,6 +746,9 @@ static GpCopyInContext copy_context = NULL;
 static void *copy_context_arg = NULL;
 static bool copy_ending = false;
 
+/* What a COPY whose statement failed here is told (gang_cancel_and_drain()). */
+#define COPY_IN_FAILED	"the statement that sent the rows failed"
+
 /*
  * The coordinator's transaction, as the segments know it.  "depth" counts the
  * transaction levels they have been given: 1 for the BEGIN, one more for each
@@ -3145,6 +3148,24 @@ gang_drain_keeping(List **errors)
 				}
 				if (errors != NULL && PQresultStatus(res) == PGRES_FATAL_ERROR)
 					collect_error(errors, c->content, res, c->conn, NULL);
+
+				/*
+				 * A connection still taking a COPY's rows answers "COPY IN"
+				 * for as long as it is asked: the COPY is failed, or this
+				 * would never end (gang_cancel_and_drain() has seen to it
+				 * already).
+				 */
+				if (PQresultStatus(res) == PGRES_COPY_IN)
+				{
+					if (copying == c)
+						copying = NULL;
+					if (PQputCopyEnd(c->conn, COPY_IN_FAILED) != 1)
+					{
+						PQclear(res);
+						gang_close();
+						return;
+					}
+				}
 				PQclear(res);
 			}
 
@@ -3201,6 +3222,26 @@ gang_cancel_and_drain(void)
 			if (err != NULL)
 				elog(DEBUG1, "could not cancel the query on segment %d: %s",
 					 gang->conns[i].content, err);
+		}
+	}
+
+	/*
+	 * A connection a COPY's rows were going through when the statement
+	 * failed here (GpCopyInBegin()): the COPY is failed.  A cancel alone
+	 * does not end one whose segment waits for rows -- a backend reading its
+	 * client's COPY data takes no cancel until more arrives -- and until
+	 * the COPY is ended the connection answers "COPY IN" to whoever reads
+	 * it: the drain below read that answer for ever.
+	 */
+	if (copying != NULL)
+	{
+		GpSegmentConn *c = copying;
+
+		copying = NULL;
+		if (PQputCopyEnd(c->conn, COPY_IN_FAILED) != 1)
+		{
+			gang_close();
+			return;
 		}
 	}
 	gang_drain_quietly();
