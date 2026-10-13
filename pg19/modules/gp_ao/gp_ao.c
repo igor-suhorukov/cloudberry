@@ -1438,7 +1438,49 @@ gp_ao_ExecutorFinish(QueryDesc *queryDesc)
  * as Cloudberry's do even with the global deadlock detector on, taken as the
  * parser opens the table rather than after its RowExclusiveLock, which two
  * writers would deadlock upgrading.
+ *
+ * And so does a locking clause, on a node that locks for itself: the one
+ * node, or a session of a segment's own.  No one can lock a row of such a
+ * table (ao_tuple_lock()), so under PostgreSQL's RowShareLock two sessions'
+ * FOR UPDATE would not exclude each other, and the UPDATE each then ran
+ * would wait for the other's lock.  Cloudberry's parser takes the table's
+ * ExclusiveLock there, whatever the clause's strength, and so does this,
+ * which is not told the strength.  A cluster's coordinator has decided
+ * before this is asked (gp_core's hook, which this one calls first): the
+ * table's ExclusiveLock without the global deadlock detector, and with it
+ * AccessShareLock until the query is planned.
+ *
+ * The clause's table may be a partitioned one, or a parent, that is not
+ * append-optimized itself and has a partition, or a child, that is: the
+ * planner locks each in the mode its parent's range table entry has, so the
+ * parent is asked for the mode its append-optimized child needs.  Its other
+ * children are then held in it too, rows that could be locked among them.
  */
+static bool
+relid_or_child_is_ao(Oid relid)
+{
+	List	   *all;
+	ListCell   *lc;
+	bool		found = false;
+
+	if (relid_is_ao(relid))
+		return true;
+	if (!has_subclass(relid))
+		return false;
+	/* a child dropped meanwhile has no access method to find */
+	all = find_all_inheritors(relid, NoLock, NULL);
+	foreach(lc, all)
+	{
+		if (relid_is_ao(lfirst_oid(lc)))
+		{
+			found = true;
+			break;
+		}
+	}
+	list_free(all);
+	return found;
+}
+
 static LOCKMODE
 gp_ao_query_lockmode(Oid relid, LOCKMODE lockmode, AclMode requiredPerms)
 {
@@ -1448,6 +1490,8 @@ gp_ao_query_lockmode(Oid relid, LOCKMODE lockmode, AclMode requiredPerms)
 	if (lockmode == RowExclusiveLock &&
 		(requiredPerms & (ACL_UPDATE | ACL_DELETE)) != 0 &&
 		relid_is_ao(relid))
+		return ExclusiveLock;
+	if (lockmode == RowShareLock && relid_or_child_is_ao(relid))
 		return ExclusiveLock;
 	return lockmode;
 }

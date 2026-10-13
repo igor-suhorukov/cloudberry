@@ -424,6 +424,41 @@ settled s2
 wait "$waiter"
 is "and goes ahead when the writer rolls back" "SELECT v FROM u WHERE id = 3000;" "second"
 
+# A locking clause: no row of such a table can be locked, so the table is,
+# in ExclusiveLock, as Cloudberry's parser locks it -- under PostgreSQL's
+# RowShareLock two sessions' FOR UPDATE both went ahead, and the UPDATE each
+# then ran waited for the other's lock.
+echo "BEGIN; SELECT a FROM tx WHERE a = 1 FOR UPDATE;" >&7
+settled s2
+is "a locking clause holds the table in ExclusiveLock, where no row can be locked" \
+   "SELECT string_agg(mode, ',' ORDER BY mode) FROM pg_locks WHERE relation = 'tx'::regclass AND granted;" \
+   "ExclusiveLock"
+q "SELECT a + 1 FROM tx WHERE a = 1 FOR UPDATE;" > "$WORK/fu.out" 2>&1 &
+waiter=$!
+waits "SELECT a + 1 FROM tx WHERE a = 1 FOR UPDATE" \
+	&& ok "so a second session's FOR UPDATE waits for the first, as it waits for a heap's row" \
+	|| notok "a second session's FOR UPDATE waits" "$(q "SELECT state, wait_event_type, query FROM pg_stat_activity WHERE query LIKE 'SELECT a + 1 FROM tx%';")"
+echo "UPDATE tx SET a = 1 WHERE a = 1; COMMIT;" >&7
+settled s2
+wait "$waiter"
+[ "$(cat "$WORK/fu.out")" = 2 ] \
+	&& ok "and has the row once the first, which updated it meanwhile, has ended" \
+	|| notok "the second FOR UPDATE has the row" "$(cat "$WORK/fu.out")"
+# ... and where the clause names a partitioned table that is not
+# append-optimized, one partition of which is: the planner locks a partition
+# in its parent's mode.
+q "CREATE TABLE mxp (a int, b int) PARTITION BY RANGE (a);
+   CREATE TABLE mxp_h PARTITION OF mxp FOR VALUES FROM (0) TO (100);
+   CREATE TABLE mxp_a PARTITION OF mxp FOR VALUES FROM (100) TO (200) USING ao_row;
+   INSERT INTO mxp SELECT i, i FROM generate_series(1, 199) i;" > /dev/null
+echo "BEGIN; SELECT a FROM mxp WHERE a = 150 FOR UPDATE;" >&7
+settled s2
+is "a partitioned heap table's append-optimized partition is held so too, through its parent" \
+   "SELECT string_agg(mode, ',' ORDER BY mode) FROM pg_locks WHERE relation = 'mxp_a'::regclass AND granted;" \
+   "ExclusiveLock"
+echo "COMMIT;" >&7
+settled s2
+
 ###############################################################################
 echo "7. VACUUM compacts, and recycles what no snapshot sees any more"
 ###############################################################################
