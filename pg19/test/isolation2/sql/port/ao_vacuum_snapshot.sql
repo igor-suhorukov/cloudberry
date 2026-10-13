@@ -12,15 +12,27 @@
 -- function that sleeps; this reads after segment 0 has restarted too, which
 -- has what to hide from its log alone, and after a VACUUM of a session of
 -- segment 0's own, which the coordinator told nothing.
+--
+-- And the log's rows of it: a compaction is hidden with every part that had
+-- committed on its segment and a snapshot may still hide, which under a
+-- snapshot long held are many -- here two hundred and ten transactions on
+-- segment 0 besides the DELETEs.  It writes a row for each two hundred and
+-- one of them, where it wrote a row for each.
 
 CREATE TABLE ao_vacuum_snapshot_row (a int, b int) USING ao_row DISTRIBUTED BY (a);
 CREATE TABLE ao_vacuum_snapshot_column (a int, b int) USING ao_column DISTRIBUTED BY (a);
 INSERT INTO ao_vacuum_snapshot_row SELECT i, i FROM generate_series(1, 100) i;
 INSERT INTO ao_vacuum_snapshot_column SELECT i, i FROM generate_series(1, 100) i;
 
+-- n transactions, each a row of a key segment 0 has
+CREATE TABLE ao_vacuum_snapshot_parts (a int) DISTRIBUTED BY (a);
+CREATE PROCEDURE ao_vacuum_snapshot_many(n int) LANGUAGE plpgsql AS $$ DECLARE k int; BEGIN SELECT min(a) INTO k FROM ao_vacuum_snapshot_row WHERE gp_segment_id = 0; COMMIT; FOR i IN 1..n LOOP INSERT INTO ao_vacuum_snapshot_parts VALUES (k); COMMIT; END LOOP; END $$;
+
 1: BEGIN ISOLATION LEVEL REPEATABLE READ;
 1: SELECT 'snapshot' FROM pg_class LIMIT 1;
 
+2: CALL ao_vacuum_snapshot_many(210);
+2: SELECT gp_segment_id, count(*) FROM ao_vacuum_snapshot_parts GROUP BY 1;
 2: DELETE FROM ao_vacuum_snapshot_row WHERE a <= 60;
 2: DELETE FROM ao_vacuum_snapshot_column WHERE a <= 60;
 2: VACUUM ao_vacuum_snapshot_row;
@@ -35,8 +47,9 @@ INSERT INTO ao_vacuum_snapshot_column SELECT i, i FROM generate_series(1, 100) i
 2: VACUUM ao_vacuum_snapshot_row;
 2: SELECT segno, state, sum(tupcount) FROM gp_toolkit.__gp_aoseg('ao_vacuum_snapshot_row') GROUP BY 1, 2 ORDER BY 1;
 
--- The compactions are logged with the DELETEs' parts they are hidden with.
-0U: SELECT count(*) > 0 AS logged FROM gp_internal.distributed_log WHERE follows;
+-- The compactions are logged with the parts they are hidden with: the two
+-- DELETEs' and the two hundred and ten before them, in two rows each.
+0U: SELECT count(*) AS log_rows, sum(1 + cardinality(followed)) AS parts FROM gp_internal.distributed_log WHERE follows;
 0Uq:
 
 -- Segment 0 restarts, and reads its map back from the log.

@@ -133,9 +133,10 @@
  * twice.  So such a transaction asks to be hidden from every distributed
  * snapshot that hides a part which had committed here as it worked
  * (GpDtxFollowCommitted()): its ID is kept with each of those parts in the
- * map, hidden with the part's own, and logged with each, so that a restart
- * has it; and it is one no snapshot hides once the last of them has left
- * the map (GpDtxIsFollowed()), which is when what it replaced may go.
+ * map, hidden with the part's own, and logged with them, a row for a few
+ * hundred of them (log_followers()), so that a restart has it; and it is one
+ * no snapshot hides once the last of them has left the map
+ * (GpDtxIsFollowed()), which is when what it replaced may go.
  *
  * Cloudberry sources this file stands in for:
  *	  src/backend/cdb/cdbtm.c (the segment's half), cdbdtxrecovery.c,
@@ -1186,8 +1187,8 @@ log_part(FullTransactionId gxid, const TransactionId *children, int nchildren,
 {
 	Oid			relid = log_relid();
 	Relation	rel;
-	Datum		values[5];
-	bool		nulls[5] = {false, false, false, false, false};
+	Datum		values[6];
+	bool		nulls[6] = {false, false, false, false, false, true};
 	HeapTuple	tup;
 	GpDtxSnapshot *ds;
 
@@ -1228,10 +1229,51 @@ log_part(FullTransactionId gxid, const TransactionId *children, int nchildren,
 }
 
 /*
- * A follower's rows, one for each part it follows, with the
- * subtransactions it has committed: this transaction's, so that they commit
- * with it.  No row is deleted here, as a part deletes a few: the
- * transaction has no distributed snapshot to say which.
+ * How many parts beside its own a follower's row names: a row that is never
+ * so long as to be stored out of line, which a snapshot being made could not
+ * read back.
+ */
+#define LOG_FOLLOWED_PER_ROW	200
+
+/* An array of coordinator transaction IDs, for the log's column "followed". */
+static Datum
+gxid_array(const FullTransactionId *gxids, int n)
+{
+	Datum	   *elems = palloc_array(Datum, n);
+
+	for (int i = 0; i < n; i++)
+		elems[i] = FullTransactionIdGetDatum(gxids[i]);
+	return PointerGetDatum(construct_array(elems, n, XID8OID, sizeof(uint64),
+										   true, TYPALIGN_DOUBLE));
+}
+
+/* ... and one read back, into *gxids; how many. */
+static int
+gxid_array_read(Datum array, FullTransactionId **gxids)
+{
+	Datum	   *elems;
+	int			n;
+
+	deconstruct_array(DatumGetArrayTypeP(array), XID8OID, sizeof(uint64),
+					  true, TYPALIGN_DOUBLE, &elems, NULL, &n);
+	*gxids = palloc_array(FullTransactionId, Max(n, 1));
+	for (int i = 0; i < n; i++)
+		(*gxids)[i] = DatumGetFullTransactionId(elems[i]);
+	return n;
+}
+
+/*
+ * A follower's rows, with the subtransactions it has committed: this
+ * transaction's, so that they commit with it.  Not a row for each part it
+ * follows -- with an old snapshot held those are every part since, thousands
+ * a compaction, and a later part deletes two rows as it writes its own --
+ * but one for every LOG_FOLLOWED_PER_ROW of them and one more: the row is
+ * the newest of its parts', which it names in gxid, and the others are in
+ * "followed".  So a row goes when the last of its parts may, as a part's
+ * own does (log_prune()), and what reads the log from a coordinator
+ * transaction on finds every follower of a part at or after it.  gxids is
+ * in the map's order, oldest first.  No row is deleted here, as a part
+ * deletes a few: the transaction has no distributed snapshot to say which.
  */
 static void
 log_followers(const FullTransactionId *gxids, int n,
@@ -1239,8 +1281,8 @@ log_followers(const FullTransactionId *gxids, int n,
 {
 	Oid			relid = log_relid();
 	Relation	rel;
-	Datum		values[5];
-	bool		nulls[5] = {false, false, false, true, false};
+	Datum		values[6];
+	bool		nulls[6] = {false, false, false, true, false, true};
 
 	if (!OidIsValid(relid) || n == 0)
 		return;
@@ -1260,11 +1302,17 @@ log_followers(const FullTransactionId *gxids, int n,
 		nulls[3] = false;
 	}
 	values[4] = BoolGetDatum(true);
-	for (int i = 0; i < n; i++)
+	for (int first = 0; first < n; first += LOG_FOLLOWED_PER_ROW + 1)
 	{
+		int			last = Min(first + LOG_FOLLOWED_PER_ROW, n - 1);
 		HeapTuple	tup;
 
-		values[0] = FullTransactionIdGetDatum(gxids[i]);
+		Assert(first == last ||
+			   FullTransactionIdPrecedes(gxids[first], gxids[last]));
+		values[0] = FullTransactionIdGetDatum(gxids[last]);
+		nulls[5] = last == first;
+		if (!nulls[5])
+			values[5] = gxid_array(&gxids[first], last - first);
 		tup = heap_form_tuple(RelationGetDescr(rel), values, nulls);
 		CatalogTupleInsert(rel, tup);
 		heap_freetuple(tup);
@@ -1282,6 +1330,8 @@ typedef struct LoggedPart
 	bool		follows;
 	int			nchildren;
 	TransactionId *children;
+	int			nfollowed;		/* a follower's other parts, beside gxid */
+	FullTransactionId *followed;
 } LoggedPart;
 
 static Oid *
@@ -1377,6 +1427,13 @@ map_load_database(void)
 					p->children[i] = DatumGetTransactionId(elems[i]);
 				p->nchildren = n;
 			}
+			if (p->follows)
+			{
+				Datum		followed = slot_getattr(tslot, 6, &isnull);
+
+				if (!isnull)
+					p->nfollowed = gxid_array_read(followed, &p->followed);
+			}
 			parts = lappend(parts, p);
 		}
 		ExecDropSingleTupleTableSlot(tslot);
@@ -1396,22 +1453,31 @@ map_load_database(void)
 				FullTransactionIdEquals(e[pos].gxid, p->gxid);
 
 			/*
-			 * A follower of the part: with the entry the map has for it, or
-			 * with one of no part yet, which this database's rows or
-			 * another's may still give it.
+			 * A follower of the part, and of each part its row names beside
+			 * it: with the entry the map has for the part, or with one of no
+			 * part yet, which this database's rows or another's may still
+			 * give it.
 			 */
 			if (p->follows)
 			{
-				if (!has)
+				for (int f = -1; f < p->nfollowed; f++)
 				{
-					map_put(p->gxid, InvalidTransactionId, NULL, 0, false);
+					FullTransactionId gxid = f < 0 ? p->gxid : p->followed[f];
+
+					pos = map_lower_bound(gxid);
 					e = map_entries();
-					e[pos].done = true;
-					e[pos].committed = true;
+					if (e == NULL || pos >= dtx_shared->n ||
+						!FullTransactionIdEquals(e[pos].gxid, gxid))
+					{
+						map_put(gxid, InvalidTransactionId, NULL, 0, false);
+						e = map_entries();
+						e[pos].done = true;
+						e[pos].committed = true;
+					}
+					(void) map_add_follower(&e[pos], p->xid);
+					for (int c = 0; c < p->nchildren; c++)
+						(void) map_add_follower(&e[pos], p->children[c]);
 				}
-				(void) map_add_follower(&e[pos], p->xid);
-				for (int c = 0; c < p->nchildren; c++)
-					(void) map_add_follower(&e[pos], p->children[c]);
 				continue;
 			}
 			if (has && TransactionIdIsValid(e[pos].xid))
@@ -1736,7 +1802,28 @@ dtx_craft_mirror(Snapshot snap, const GpDtxSnapshot *ds)
 
 			gxid = DatumGetFullTransactionId(heap_getattr(tup, 1, RelationGetDescr(rel), &isnull));
 			if (!dtx_in_progress(ds, gxid))
-				continue;
+			{
+				Datum		followed;
+				FullTransactionId *gxids;
+				int			n;
+				bool		hidden = false;
+
+				/*
+				 * A follower is hidden with any of its parts, the older
+				 * ones its row names beside this one too (log_followers()).
+				 */
+				if (!DatumGetBool(heap_getattr(tup, 5, RelationGetDescr(rel), &isnull)))
+					continue;
+				followed = heap_getattr(tup, 6, RelationGetDescr(rel), &isnull);
+				if (isnull)
+					continue;
+				n = gxid_array_read(followed, &gxids);
+				for (int i = 0; i < n && !hidden; i++)
+					hidden = dtx_in_progress(ds, gxids[i]);
+				pfree(gxids);
+				if (!hidden)
+					continue;
+			}
 			xid = XidFromFullTransactionId(DatumGetFullTransactionId(heap_getattr(tup, 2, RelationGetDescr(rel), &isnull)));
 			if (!xid_in_progress_for(snap, xid, hide, nhide))
 			{
