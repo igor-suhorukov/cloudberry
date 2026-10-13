@@ -322,18 +322,20 @@ extern void GpDispatchWriteReturning(const char *sql, int content,
 									 bool one_segment, uint64 *counts);
 
 /*
- * COPY ... FROM STDIN on one segment: begin with the COPY statement, send the
- * data in pieces, and end, which answers how many rows the segment took.  One
- * at a time.  An error the segment raises in the data has its context given
- * to "context", when given, with the segment's content and "arg": what it
- * answers is the error's context here, or NULL for none.
+ * COPY ... FROM STDIN on the segments listed, at once: begin with the COPY
+ * statement, send each its data in pieces, and end, which answers how many
+ * rows each took, in the segments' order.  One COPY at a time.  An error a
+ * segment raises in the data -- the first segment's in their order, where
+ * several did -- has its context given to "context", when given, with the
+ * segment's content and "arg": what it answers is the error's context here,
+ * or NULL for none.
  */
 typedef char *(*GpCopyInContext) (int content, const char *context, void *arg);
 
-extern void GpCopyInBegin(int content, const char *sql,
+extern void GpCopyInBegin(const int *contents, int ncontents, const char *sql,
 						  GpCopyInContext context, void *arg);
-extern void GpCopyInData(const char *data, int len);
-extern uint64 GpCopyInEnd(void);
+extern void GpCopyInData(int content, const char *data, int len);
+extern void GpCopyInEnd(uint64 *counts);
 
 /*
  * A query on every segment (content -1) or one: the first column of each

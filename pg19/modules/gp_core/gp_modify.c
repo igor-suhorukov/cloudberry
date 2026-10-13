@@ -29,7 +29,11 @@
  * the row triggers where the row lands, as Cloudberry's segments do.  They are
  * held on the coordinator until the plan that made them is finished, because
  * that plan may be reading from the same segments over the same connections.
- * COPY FROM routes its rows the same way, parsed by PostgreSQL's own COPY.
+ * Then they go to every segment at once, where no INSERT into the table
+ * waits for another -- or else one segment after another, so that two
+ * statements cannot wait for each other on different segments
+ * (router_sends_at_once()).  COPY FROM routes its rows the same way, parsed
+ * by PostgreSQL's own COPY.
  *
  * UPDATE and DELETE.  A statement whose rows are all on the segment where the
  * row it changes is -- it reads the table it changes, and nothing else but
@@ -68,6 +72,7 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/table.h"
 #include "access/tableam.h"
 #include "access/xact.h"
@@ -75,6 +80,7 @@
 #include "catalog/objectaddress.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_class.h"
+#include "catalog/pg_index.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_trigger.h"
@@ -110,6 +116,7 @@
 #include "utils/rel.h"
 #include "utils/rls.h"
 #include "utils/ruleutils.h"
+#include "utils/syscache.h"
 #include "utils/tuplestore.h"
 
 #include "gp_cluster.h"
@@ -167,6 +174,65 @@ typedef struct GpRouter
 	 */
 	struct PlannedStmt *reached_stmt;
 } GpRouter;
+
+/*
+ * May a statement's rows go to every segment at once?
+ *
+ * Sent one segment after another, a statement waits at a segment while it
+ * holds locks only on the segments before it, so two statements never wait
+ * for each other on different segments, where no segment's own deadlock
+ * check finds them and only the global deadlock detector does.  Sent at
+ * once they can: each first, on a different segment, with the same key of
+ * a unique index, or in whatever a trigger locks.
+ *
+ * So at once with the detector on, which is what it is for; and without it
+ * where nothing has one INSERT into the table wait for another: no unique
+ * or exclusion index, and no trigger an INSERT fires, on the table or, a
+ * partitioned table's rows going to its partitions on the segment, on any
+ * of them.  A table of facts loaded in bulk is usually such a table; one
+ * with a primary key is loaded in the order of its segments, each segment's
+ * time after the last one's.
+ *
+ * Asked only of rows that go to more than one segment: a row of an INSERT
+ * of one opens no partition here to learn it.
+ */
+static bool
+router_sends_at_once(Relation rel)
+{
+	List	   *members = list_make1_oid(RelationGetRelid(rel));
+
+	if (gp_enable_global_deadlock_detector)
+		return true;
+	if (rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+		members = find_all_inheritors(RelationGetRelid(rel), RowExclusiveLock, NULL);
+
+	foreach_oid(member, members)
+	{
+		Relation	m = table_open(member, NoLock);
+		TriggerDesc *trig = m->trigdesc;
+		bool		waits;
+
+		waits = trig != NULL &&
+			(trig->trig_insert_before_row || trig->trig_insert_after_row ||
+			 trig->trig_insert_instead_row || trig->trig_insert_before_statement ||
+			 trig->trig_insert_after_statement);
+		foreach_oid(indexoid, RelationGetIndexList(m))
+		{
+			HeapTuple	tuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(indexoid));
+
+			if (!HeapTupleIsValid(tuple))
+				continue;
+			if (((Form_pg_index) GETSTRUCT(tuple))->indisunique ||
+				((Form_pg_index) GETSTRUCT(tuple))->indisexclusion)
+				waits = true;
+			ReleaseSysCache(tuple);
+		}
+		table_close(m, NoLock);
+		if (waits)
+			return false;
+	}
+	return true;
+}
 
 /*
  * lines: the rows are a COPY's, each put with its line in the data, which
@@ -259,7 +325,14 @@ router_put(GpRouter *r, TupleTableSlot *slot, uint64 lineno)
 	{
 		MemoryContext oldcxt = MemoryContextSwitchTo(GetMemoryChunkContext(r));
 
-		r->stores[seg] = tuplestore_begin_heap(false, false, work_mem);
+		/*
+		 * work_mem is the statement's for its rows on their way, not each
+		 * segment's: a store has its part of it, and a replicated table's
+		 * one store the whole.  64 kB is the least work_mem itself can be.
+		 */
+		r->stores[seg] = tuplestore_begin_heap(false, false,
+											   r->replicated ? work_mem
+											   : Max(work_mem / r->nsegs, 64));
 		MemoryContextSwitchTo(oldcxt);
 	}
 	if (r->lines)
@@ -430,80 +503,141 @@ router_encode(GpRouter *r, TupleTableSlot *slot, StringInfo buf)
 		appendStringInfoChar(buf, '\n');
 }
 
-/* Send one segment's rows, and answer how many it took. */
-static uint64
-router_send(GpRouter *r, Tuplestorestate *store, int content)
+/*
+ * A piece more of a store's rows, as COPY reads them, in buf; false once the
+ * store has no more after it.  "first" is its first piece.
+ */
+static bool
+router_next_piece(GpRouter *r, Tuplestorestate *store, bool first,
+				  StringInfo buf, MemoryContext rowcxt)
 {
+	resetStringInfo(buf);
+	if (first)
+	{
+		tuplestore_rescan(store);
+		if (r->binary)
+		{
+			/* PGCOPY\n\377\r\n\0, no flags, no header extension */
+			appendBinaryStringInfo(buf, "PGCOPY\n\377\r\n\0", 11);
+			pq_sendint32(buf, 0);
+			pq_sendint32(buf, 0);
+		}
+	}
+
+	while (buf->len < ROUTE_CHUNK)
+	{
+		MemoryContext oldcxt;
+
+		if (!tuplestore_gettupleslot(store, true, false, r->slot))
+		{
+			if (r->binary)
+				pq_sendint16(buf, -1);
+			return false;
+		}
+		oldcxt = MemoryContextSwitchTo(rowcxt);
+		router_encode(r, r->slot, buf);
+		MemoryContextSwitchTo(oldcxt);
+		MemoryContextReset(rowcxt);
+	}
+	return true;
+}
+
+/*
+ * Send the segments listed their rows, all of them at once: a piece of each
+ * segment's in turn, so that each loads while the others are sent theirs,
+ * and the statement takes its slowest segment's time, not their times
+ * together.  A replicated table's rows are one store's, and each piece of it
+ * goes to every segment listed.  Answer how many rows the segments took; of
+ * a replicated table, how many one of them did.
+ */
+static uint64
+router_send(GpRouter *r, const int *segs, int nsegs)
+{
+	int			nstores = r->replicated ? 1 : nsegs;
+	bool	   *more = palloc_array(bool, nstores);
+	bool	   *begun = palloc0_array(bool, nstores);
+	uint64	   *counts = palloc0_array(uint64, nsegs);
+	uint64		total = 0;
+	bool		any;
 	StringInfoData buf;
 	MemoryContext rowcxt = AllocSetContextCreate(CurrentMemoryContext,
 												 "gp_core routed row",
 												 ALLOCSET_DEFAULT_SIZES);
-	MemoryContext oldcxt;
 
-	GpCopyInBegin(content, r->copy_sql, router_error_context, r);
+	GpCopyInBegin(segs, nsegs, r->copy_sql, router_error_context, r);
 
 	initStringInfo(&buf);
-	if (r->binary)
+	memset(more, true, nstores * sizeof(bool));
+	do
 	{
-		/* PGCOPY\n\377\r\n\0, no flags, no header extension */
-		appendBinaryStringInfo(&buf, "PGCOPY\n\377\r\n\0", 11);
-		pq_sendint32(&buf, 0);
-		pq_sendint32(&buf, 0);
-	}
-
-	tuplestore_rescan(store);
-	while (tuplestore_gettupleslot(store, true, false, r->slot))
-	{
-		oldcxt = MemoryContextSwitchTo(rowcxt);
-		router_encode(r, r->slot, &buf);
-		MemoryContextSwitchTo(oldcxt);
-		MemoryContextReset(rowcxt);
-
-		if (buf.len >= ROUTE_CHUNK)
+		any = false;
+		for (int i = 0; i < nstores; i++)
 		{
-			GpCopyInData(buf.data, buf.len);
-			resetStringInfo(&buf);
+			if (!more[i])
+				continue;
+			more[i] = router_next_piece(r, r->stores[r->replicated ? 0 : segs[i]],
+										!begun[i], &buf, rowcxt);
+			begun[i] = true;
+			any = any || more[i];
+			if (buf.len == 0)
+				continue;
+			if (r->replicated)
+			{
+				for (int j = 0; j < nsegs; j++)
+					GpCopyInData(segs[j], buf.data, buf.len);
+			}
+			else
+				GpCopyInData(segs[i], buf.data, buf.len);
+			CHECK_FOR_INTERRUPTS();
 		}
-		CHECK_FOR_INTERRUPTS();
-	}
-
-	if (r->binary)
-		pq_sendint16(&buf, -1);
-	if (buf.len > 0)
-		GpCopyInData(buf.data, buf.len);
+	} while (any);
 
 	pfree(buf.data);
 	MemoryContextDelete(rowcxt);
-	return GpCopyInEnd();
+	GpCopyInEnd(counts);
+
+	for (int i = 0; i < nsegs; i++)
+		total = r->replicated ? counts[i] : total + counts[i];
+	pfree(counts);
+	pfree(more);
+	pfree(begun);
+	return total;
 }
 
 /*
  * Send every segment its rows; answer how many rows the statement wrote:
  * those the segments took, which a BEFORE row trigger that answers NULL
  * leaves fewer than were sent, as PostgreSQL's INSERT and COPY count them.
+ * Every segment takes a replicated table's every row, and the statement
+ * wrote each once.
  */
 static uint64
 router_finish(GpRouter *r)
 {
+	int		   *segs = palloc_array(int, r->nsegs);
+	int			nsegs = 0;
 	uint64		total = 0;
 
-	if (r->replicated)
+	for (int seg = 0; seg < r->nsegs; seg++)
+		if (r->stores[r->replicated ? 0 : seg] != NULL)
+			segs[nsegs++] = seg;
+
+	if (nsegs > 1 && router_sends_at_once(r->rel))
 	{
-		/* Every segment takes every row; the statement wrote each once. */
-		if (r->stores[0] != NULL)
-			for (int seg = 0; seg < r->nsegs; seg++)
-				total = router_send(r, r->stores[0], seg);
-		return total;
+		if (r->reached_stmt != NULL && !r->replicated)
+			GpReportDtxReached(r->reached_stmt, segs, nsegs);
+		return router_send(r, segs, nsegs);
 	}
 
-	for (int seg = 0; seg < r->nsegs; seg++)
+	/* One segment after another, in their order */
+	for (int i = 0; i < nsegs; i++)
 	{
-		if (r->stores[seg] != NULL)
-		{
-			if (r->reached_stmt != NULL)
-				GpReportDtxReached(r->reached_stmt, &seg, 1);
-			total += router_send(r, r->stores[seg], seg);
-		}
+		uint64		took;
+
+		if (r->reached_stmt != NULL && !r->replicated)
+			GpReportDtxReached(r->reached_stmt, &segs[i], 1);
+		took = router_send(r, &segs[i], 1);
+		total = r->replicated ? took : total + took;
 	}
 	return total;
 }

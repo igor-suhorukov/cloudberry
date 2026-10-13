@@ -461,6 +461,18 @@ Distributed transactions (M3), in `gp_core`:
   is (O10), and `gp.session_id`;
 - `INSERT ... ON CONFLICT` into a distributed table, the clause each
   segment's;
+- the rows of an `INSERT` the planner plans, and of every `COPY FROM`, go
+  to all the table's segments at once where no INSERT into the table waits
+  for another -- no unique or exclusion index, and no trigger an INSERT
+  fires, on the table or its partitions -- or with the deadlock detector
+  on; and one segment after another otherwise, so that two statements
+  with the same keys never wait for each other on different segments,
+  where no segment would see the deadlock.  So a table with a primary key
+  loads in its segments' times one after another, and without one, or
+  with the detector, in its slowest segment's.  Until they are sent the
+  rows are held on the coordinator, in `work_mem` for all the segments
+  together and in temporary files past it; a cancel reaches a statement
+  while it sends them;
 - **`SELECT ... FOR UPDATE`** and the other locking clauses: under ORCA as
   under the planner, the rows are locked by a LockRows node — at the top of
   the plan on one node, on the segments below the Gather on a cluster with

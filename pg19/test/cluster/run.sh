@@ -1032,9 +1032,61 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 		&& ok "a COPY's error, on a segment or here, names the line of its data" \
 		|| notok "a COPY's error context" "$out / $out2"
 
+	# The rows go to every segment at once where no INSERT into the table
+	# waits for another, and so no two statements for each other on
+	# different segments: no unique or exclusion index, no trigger an INSERT
+	# fires.  One segment after another where there is one, a primary key
+	# here -- the order is what keeps two statements with the same keys from
+	# a deadlock no segment sees -- until the global deadlock detector is on
+	# (section 14).  Shown by holding the first segment's COPY at the table's
+	# lock: the second segment has been sent its COPY by then, or has not.
+	q 0 "CREATE TABLE rt_o (k int, v int CHECK (v > 0)) DISTRIBUTED BY (k);
+	     CREATE TABLE rt_k (k int PRIMARY KEY, v int CHECK (v > 0)) DISTRIBUTED BY (k);" >/dev/null
+	route_seen() {				# route_seen <table>: is the second segment sent its COPY while the first waits?  By COPY FROM, which is routed whoever plans.
+		local t=$1 w= seen= holder ins
+		(printf '%s\n' "BEGIN;" "LOCK TABLE $t IN SHARE MODE;" "SELECT pg_sleep(60);" | qf 1 >/dev/null 2>&1) &
+		holder=$!
+		for _ in $(seq 100); do
+			w=$(q 1 "SELECT count(*) FROM pg_locks WHERE relation = '$t'::regclass AND mode = 'ShareLock' AND granted;")
+			[ "$w" = 1 ] && break
+			sleep 0.1
+		done
+		{ echo "COPY $t FROM STDIN;"; seq 1 200 | sed 's/.*/&\t&/'; echo '\.'; } | qf 0 >/dev/null 2>&1 &
+		ins=$!
+		for _ in $(seq 100); do
+			w=$(q 1 "SELECT count(*) FROM pg_stat_activity WHERE query LIKE 'COPY public.$t %' AND wait_event_type = 'Lock';")
+			[ "$w" = 1 ] && break
+			sleep 0.1
+		done
+		seen=$(q 2 "SELECT count(*) FROM pg_stat_activity WHERE query LIKE 'COPY public.$t %';")
+		q 1 "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE query LIKE '%pg_sleep(60)%' AND pid <> pg_backend_pid();" >/dev/null
+		wait "$holder" "$ins"
+		echo "$w$seen"
+	}
+	out=$(route_seen rt_o)
+	out2=$(route_seen rt_k)
+	out3=$(q 0 "SELECT (SELECT count(*) FROM rt_o) || ' ' || (SELECT count(*) FROM rt_k);")
+	[ "$out|$out2|$out3" = "11|10|200 200" ] \
+		&& ok "routed rows go to every segment at once, and one segment after another into a table with a unique index" \
+		|| notok "the route of a COPY's rows (first segment waits, second sent: at once / in order)" "$out / $out2 / $out3"
+
+	# Rows that fail on both segments: the error is the first segment's in
+	# their order and names that one alone, as it does where the rows go in
+	# that order and the statement never reaches the second.
+	first=$(q 0 "SELECT min(k) FROM rt_o WHERE gp_segment_id = 0 AND k > 150;")
+	out=$(q 0 "INSERT INTO rt_o SELECT i, CASE WHEN i > 150 THEN -i ELSE i END FROM generate_series(1, 400) i;" | tr '\n' ' ')
+	out2=$(q 0 "INSERT INTO rt_k SELECT i, CASE WHEN i > 150 THEN -i ELSE i END FROM generate_series(201, 600) i;" | tr '\n' ' ')
+	out3=$(q 0 "SELECT (SELECT count(*) FROM rt_o) || ' ' || (SELECT count(*) FROM rt_k);")
+	case "$out|$out2|$out3" in
+		*"other segments failed"*) notok "rows failing on two segments at once name one" "$out / $out2" ;;
+		"ERROR:  new row for relation \"rt_o\" violates check constraint \"rt_o_v_check\" DETAIL:  segment 0 ("*"): Failing row contains ($first, -$first). |ERROR:  new row for relation \"rt_k\" violates check constraint \"rt_k_v_check\" DETAIL:  segment 0 ("*"|200 200")
+			ok "rows that fail on every segment at once fail as the first segment's, and none is kept" ;;
+		*) notok "rows failing on two segments" "$out / $out2 / $out3" ;;
+	esac
+
 	# A statement cancelled while its rows travel -- the segments read
 	# slowly, here by a check that sleeps, so the cancel finds rows not yet
-	# sent -- ends its COPY and gives the session back.  The abort once read
+	# sent -- ends its COPYs and gives the session back.  The abort once read
 	# a connection still in COPY mode for ever.
 	q 0 "CREATE FUNCTION slow_ok(int) RETURNS bool LANGUAGE plpgsql AS \$\$ BEGIN PERFORM pg_sleep(0.0002); RETURN true; END \$\$;
 	     CREATE TABLE rt_s (k int, v int CHECK (slow_ok(v))) DISTRIBUTED BY (k);
@@ -1046,7 +1098,7 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 			timeout 120 "$PSQL" -X -q -t -A -h "$(sockdir 0)" -p "$(port 0)" -d postgres -f - 2>&1 | grep -v "^CONTEXT" | sed 's/^psql:<stdin>:[0-9]*: //' | tr '\n' ' ')|"
 	done
 	[ "$out" = "ERROR:  canceling statement due to statement timeout 1 |ERROR:  canceling statement due to statement timeout 1 |" ] \
-		&& ok "a statement cancelled while its rows travel ends, and the session goes on" \
+		&& ok "a statement cancelled while its rows travel ends, at once or in order, and the session goes on" \
 		|| notok "a cancel while rows travel to the segments" "$out"
 
 	# Cloudberry's options of COPY, which PostgreSQL's has not, through
@@ -4752,6 +4804,15 @@ SQL
 	out=$(q 0 "SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'gp_core global deadlock detector';")
 	[ "$out" = "1" ] && ok "with gp.enable_global_deadlock_detector the coordinator runs the detector" \
 		|| notok "the detector's process" "$out"
+
+	# And routed rows go to every segment at once whatever the table has
+	# (section 8): two statements that wait for each other on different
+	# segments are the detector's to find.
+	q 0 "CREATE TABLE rt_kd (k int PRIMARY KEY, v int) DISTRIBUTED BY (k);" >/dev/null
+	out=$(route_seen rt_kd)
+	out2=$(q 0 "SELECT count(*) FROM rt_kd;")
+	[ "$out|$out2" = "11|200" ] && ok "with it, rows go at once into a table with a unique index too" \
+		|| notok "the route of a COPY's rows with the detector on" "$out / $out2"
 
 	printf '%s\n' "BEGIN;" "UPDATE gdd SET val = val WHERE id = $r0;" "SELECT pg_sleep(2);" "COMMIT;" |
 		qf 0 >/dev/null 2>&1 &

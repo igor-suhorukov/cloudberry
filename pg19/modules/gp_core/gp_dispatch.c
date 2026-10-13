@@ -668,6 +668,8 @@ typedef struct GpSegmentConn
 	const GpSegmentConfig *seg;
 	PGconn	   *conn;
 	bool		busy;			/* a statement was sent and has not finished */
+	bool		copying;		/* that statement is a COPY taking rows
+								 * (GpCopyInBegin()) */
 
 	/*
 	 * When what is in flight is a gather's next batch, whose it is.  Several
@@ -735,8 +737,8 @@ static char *gang_dbname = NULL;
 static char *gang_username = NULL;
 static bool gang_login_super = false;	/* gang_username is a superuser */
 
-/* The connection a COPY ... FROM STDIN is going through, if any. */
-static GpSegmentConn *copying = NULL;
+/* How many connections a COPY ... FROM STDIN is going through. */
+static int	ncopying = 0;
 
 /*
  * What becomes of the context of an error the segment raises in a COPY's
@@ -746,8 +748,11 @@ static GpCopyInContext copy_context = NULL;
 static void *copy_context_arg = NULL;
 static bool copy_ending = false;
 
-/* What a COPY whose statement failed here is told (gang_cancel_and_drain()). */
+/* What a COPY whose statement failed here is told (copy_in_fail()). */
 #define COPY_IN_FAILED	"the statement that sent the rows failed"
+
+static void copy_in_fail(void);
+pg_noreturn static void copy_in_send_failed(GpSegmentConn *c, bool ending);
 
 /*
  * The coordinator's transaction, as the segments know it.  "depth" counts the
@@ -921,7 +926,7 @@ gang_close(void)
 		gang_xact_lost = true;
 	gang_in_xact = false;
 	gang_xact_depth = 0;
-	copying = NULL;
+	ncopying = 0;
 	if (gang_ds_sent != NULL)
 		pfree(gang_ds_sent);
 	gang_ds_sent = NULL;
@@ -2895,6 +2900,23 @@ raise_segment_errors(List *errors)
 	first = (GpSegmentError *) linitial(errors);
 	seg = GpClusterSegmentByContent(first->content);
 
+	/*
+	 * Rows that went to several segments at once (GpCopyInBegin()): the
+	 * error is the first segment's in their order, and the only one said --
+	 * what the statement would have met had the rows gone one segment after
+	 * another, where it never reached the segments after that one.
+	 */
+	if (copy_ending)
+	{
+		foreach_ptr(GpSegmentError, err, errors)
+		{
+			if (err->content < first->content)
+				first = err;
+		}
+		errors = list_make1(first);
+		seg = GpClusterSegmentByContent(first->content);
+	}
+
 	/* where a COPY's data failed there, as its caller has it said here */
 	if (copy_ending && copy_context != NULL && first->context != NULL)
 		first->context = copy_context(first->content, first->context,
@@ -3152,13 +3174,13 @@ gang_drain_keeping(List **errors)
 				/*
 				 * A connection still taking a COPY's rows answers "COPY IN"
 				 * for as long as it is asked: the COPY is failed, or this
-				 * would never end (gang_cancel_and_drain() has seen to it
-				 * already).
+				 * would never end (copy_in_fail() has seen to it already).
 				 */
 				if (PQresultStatus(res) == PGRES_COPY_IN)
 				{
-					if (copying == c)
-						copying = NULL;
+					if (c->copying)
+						ncopying--;
+					c->copying = false;
 					if (PQputCopyEnd(c->conn, COPY_IN_FAILED) != 1)
 					{
 						PQclear(res);
@@ -3187,6 +3209,57 @@ gang_drain_keeping(List **errors)
 				if (occurred[0].events & WL_LATCH_SET)
 					ResetLatch(MyLatch);
 			}
+		}
+	}
+}
+
+/*
+ * The connections a COPY's rows were going through when the statement
+ * failed here: each COPY is failed.  A cancel alone does not end one whose
+ * segment waits for rows -- a backend reading its client's COPY data takes
+ * no cancel until more arrives -- and until the COPY is ended the connection
+ * answers "COPY IN" to whoever reads it, for ever (gang_drain_keeping()).
+ * What was not sent yet is sent first, with a deadline, the segment by now
+ * throwing away what it reads; a connection that does not take it costs the
+ * gang.
+ */
+static void
+copy_in_fail(void)
+{
+	TimestampTz deadline = GetCurrentTimestamp() + 30 * USECS_PER_SEC;
+
+	if (gang == NULL || ncopying == 0)
+		return;
+	ncopying = 0;
+	for (int i = 0; i < gang->nconns; i++)
+	{
+		GpSegmentConn *c = &gang->conns[i];
+		int			rc;
+
+		if (!c->copying)
+			continue;
+		c->copying = false;
+		if (PQputCopyEnd(c->conn, COPY_IN_FAILED) != 1)
+		{
+			gang_close();
+			return;
+		}
+		while ((rc = PQflush(c->conn)) == 1)
+		{
+			long		left = TimestampDifferenceMilliseconds(GetCurrentTimestamp(),
+															   deadline);
+
+			if (left <= 0)
+				break;
+			(void) WaitLatchOrSocket(NULL, WL_SOCKET_WRITEABLE | WL_TIMEOUT |
+									 WL_EXIT_ON_PM_DEATH, PQsocket(c->conn),
+									 left, dispatch_wait_event());
+			(void) PQconsumeInput(c->conn);
+		}
+		if (rc != 0 || PQsetnonblocking(c->conn, 0) != 0)
+		{
+			gang_close();
+			return;
 		}
 	}
 }
@@ -3224,26 +3297,7 @@ gang_cancel_and_drain(void)
 					 gang->conns[i].content, err);
 		}
 	}
-
-	/*
-	 * A connection a COPY's rows were going through when the statement
-	 * failed here (GpCopyInBegin()): the COPY is failed.  A cancel alone
-	 * does not end one whose segment waits for rows -- a backend reading its
-	 * client's COPY data takes no cancel until more arrives -- and until
-	 * the COPY is ended the connection answers "COPY IN" to whoever reads
-	 * it: the drain below read that answer for ever.
-	 */
-	if (copying != NULL)
-	{
-		GpSegmentConn *c = copying;
-
-		copying = NULL;
-		if (PQputCopyEnd(c->conn, COPY_IN_FAILED) != 1)
-		{
-			gang_close();
-			return;
-		}
-	}
+	copy_in_fail();
 	gang_drain_quietly();
 }
 
@@ -3981,7 +4035,7 @@ GpDispatchSyncSettingsNow(const char *name)
 
 	for (int i = 0; i < NUM_SYNCED_SETTINGS && !synced; i++)
 		synced = pg_strcasecmp(synced_settings[i], name) == 0;
-	if (!synced || gang == NULL || gang_in_xact || copying != NULL ||
+	if (!synced || gang == NULL || gang_in_xact || ncopying > 0 ||
 		active_streams != NIL || GpClusterStale() || !IsTransactionState())
 		return;
 	gang_sync_settings(gang);
@@ -5905,92 +5959,209 @@ GpDispatchRelationName(Oid relid)
 /* ------------------------------------------------------------------------- */
 
 /*
- * COPY ... FROM STDIN on one segment: the way rows the coordinator routed
- * reach it.  One segment at a time, which is what a connection in COPY mode
- * allows, and why the rows are held on the coordinator until the statement
- * that produced them has finished with the gang.
+ * COPY ... FROM STDIN on the segments listed: the way rows the coordinator
+ * routed reach them.  A connection in COPY mode takes nothing else, which is
+ * why the rows are held on the coordinator until the statement that
+ * produced them has finished with the gang.
+ *
+ * Several segments at once, where the caller lists several: each is sent
+ * the COPY, and all are waited for until they read.  The data is then put
+ * on one or another (GpCopyInData()), and the end waits for them all
+ * (GpCopyInEnd()).  One that failed before it read fails the statement, and
+ * the others' COPYs with it (copy_in_fail()).
+ *
+ * While the COPY goes the connections do not block in libpq: a segment
+ * that reads slowly -- its COPY waits for a lock -- would hold the backend
+ * in a send no cancel reaches, and with the deadlock detector on, a cancel
+ * is how a deadlock between two statements' rows ends.
  */
 void
-GpCopyInBegin(int content, const char *sql, GpCopyInContext context, void *arg)
+GpCopyInBegin(const int *contents, int ncontents, const char *sql,
+			  GpCopyInContext context, void *arg)
 {
 	GpGang	   *g = gang_get();
-	GpSegmentConn *c = NULL;
 	List	   *errors = NIL;
+	int			waiting;
 
 	gang_prepare(g, true);
 
 	for (int i = 0; i < g->nconns; i++)
-		if (g->conns[i].content == content)
-			c = &g->conns[i];
-	if (c == NULL)
-		elog(ERROR, "there is no segment with content id %d", content);
+		if (conn_listed(&g->conns[i], contents, ncontents))
+			conn_send(&g->conns[i], sql);
 
-	conn_send(c, sql);
-
-	for (;;)
+	do
 	{
-		PGresult   *res;
-
-		if (PQconsumeInput(c->conn) == 0)
+		waiting = 0;
+		for (int i = 0; i < g->nconns; i++)
 		{
-			collect_error(&errors, c->content, NULL, c->conn, NULL);
-			gang_close();
+			GpSegmentConn *c = &g->conns[i];
+			PGresult   *res;
+
+			if (!conn_listed(c, contents, ncontents) || c->copying || !c->busy)
+				continue;
+			if (PQconsumeInput(c->conn) == 0)
+			{
+				collect_error(&errors, c->content, NULL, c->conn, NULL);
+				gang_close();
+				raise_segment_errors(errors);
+			}
+			if (PQisBusy(c->conn))
+			{
+				waiting++;
+				continue;
+			}
+			res = PQgetResult(c->conn);
+			if (res != NULL && PQresultStatus(res) == PGRES_COPY_IN)
+			{
+				PQclear(res);
+				c->copying = true;
+				ncopying++;
+				continue;
+			}
+
+			/* The statement failed before it began to read. */
+			collect_error(&errors, c->content, res, c->conn, NULL);
+			if (res != NULL)
+				PQclear(res);
+			while ((res = PQgetResult(c->conn)) != NULL)
+				PQclear(res);
+			c->busy = false;
+		}
+		if (waiting > 0)
+			gang_wait(g);
+	} while (waiting > 0);
+
+	if (errors != NIL)
+	{
+		copy_ending = true;		/* the first segment's error, alone */
+		PG_TRY();
+		{
 			raise_segment_errors(errors);
 		}
-		if (PQisBusy(c->conn))
+		PG_FINALLY();
 		{
-			gang_wait(g);
-			continue;
+			copy_ending = false;
 		}
-		res = PQgetResult(c->conn);
-		if (res != NULL && PQresultStatus(res) == PGRES_COPY_IN)
-		{
-			PQclear(res);
-			break;
-		}
-
-		/* The statement failed before it began to read. */
-		collect_error(&errors, c->content, res, c->conn, NULL);
-		if (res != NULL)
-			PQclear(res);
-		while ((res = PQgetResult(c->conn)) != NULL)
-			PQclear(res);
-		c->busy = false;
-		raise_segment_errors(errors);
+		PG_END_TRY();
 	}
 
-	copying = c;
+	for (int i = 0; i < g->nconns; i++)
+		if (g->conns[i].copying && PQsetnonblocking(g->conns[i].conn, 1) != 0)
+			copy_in_send_failed(&g->conns[i], false);
+
 	copy_context = context;
 	copy_context_arg = arg;
 }
 
-void
-GpCopyInData(const char *data, int len)
+/* A connection in COPY mode that takes no more: the gang goes with it. */
+static void
+copy_in_send_failed(GpSegmentConn *c, bool ending)
 {
-	Assert(copying != NULL);
+	char	   *msg = pstrdup(PQerrorMessage(c->conn));
+	int			content = c->content;
 
-	if (PQputCopyData(copying->conn, data, len) != 1)
+	gang_close();
+	ereport(ERROR,
+			(errcode(ERRCODE_CONNECTION_FAILURE),
+			 ending ? errmsg("could not finish sending rows to segment %d", content)
+			 : errmsg("could not send rows to segment %d", content),
+			 errdetail_internal("%s", msg)));
+}
+
+/*
+ * Wait until what was put on a connection in COPY mode has left for its
+ * segment -- so that no more is held here than a piece of the data, and the
+ * segment's socket is what says how fast it reads -- taking interrupts, and
+ * reading what the segment says meanwhile, so that it is never the one that
+ * waits to send.
+ */
+static void
+copy_in_flush(GpSegmentConn *c, bool ending)
+{
+	for (;;)
 	{
-		char	   *msg = pstrdup(PQerrorMessage(copying->conn));
-		int			content = copying->content;
+		int			rc = PQflush(c->conn);
 
-		copying = NULL;
-		gang_close();
-		ereport(ERROR,
-				(errcode(ERRCODE_CONNECTION_FAILURE),
-				 errmsg("could not send rows to segment %d", content),
-				 errdetail_internal("%s", msg)));
+		if (rc == 0)
+			return;
+		if (rc < 0)
+			copy_in_send_failed(c, ending);
+		(void) WaitLatchOrSocket(MyLatch,
+								 WL_LATCH_SET | WL_SOCKET_WRITEABLE |
+								 WL_SOCKET_READABLE | WL_TIMEOUT |
+								 WL_EXIT_ON_PM_DEATH,
+								 PQsocket(c->conn), 1000, dispatch_wait_event());
+		ResetLatch(MyLatch);
+		CHECK_FOR_INTERRUPTS();
+		gang_check_moved(gang);
+		if (PQconsumeInput(c->conn) == 0)
+			copy_in_send_failed(c, ending);
 	}
 }
 
-/* Wait for the COPY's result, its error's context given to its caller's. */
-static void
-copy_in_wait(int content, uint64 *count)
+/* A piece of the data, to one of the segments the COPY goes to. */
+void
+GpCopyInData(int content, const char *data, int len)
 {
+	GpSegmentConn *c = NULL;
+
+	for (int i = 0; gang != NULL && i < gang->nconns; i++)
+		if (gang->conns[i].content == content && gang->conns[i].copying)
+			c = &gang->conns[i];
+	if (c == NULL)
+		elog(ERROR, "segment %d is not taking a COPY's rows", content);
+
+	if (PQputCopyData(c->conn, data, len) != 1)
+		copy_in_send_failed(c, false);
+	copy_in_flush(c, false);
+}
+
+/*
+ * End the COPY on every segment it goes to, and wait for them: how many
+ * rows each took, in the segments' order, or why one failed -- the first of
+ * them in that order, its error's context given to GpCopyInBegin()'s caller.
+ */
+void
+GpCopyInEnd(uint64 *counts)
+{
+	GpGang	   *g = gang;
+	bool	   *ended;
+	PGresult  **results;
+	int			n = 0;
+
+	Assert(g != NULL && ncopying > 0);
+	ended = palloc0_array(bool, g->nconns);
+	results = (PGresult **) palloc0_array(PGresult *, g->nconns);
+
+	for (int i = 0; i < g->nconns; i++)
+	{
+		GpSegmentConn *c = &g->conns[i];
+
+		if (!c->copying)
+			continue;
+
+		/*
+		 * Cloudberry's, as it begins to end a COPY to the segments
+		 * (cdbCopyEndInternal(), cdbcopy.c): here as each segment's COPY
+		 * ends.
+		 */
+		(void) GP_FAULT("cdb_copy_end_internal_start");
+
+		if (PQputCopyEnd(c->conn, NULL) != 1)
+			copy_in_send_failed(c, true);
+		copy_in_flush(c, true);
+		if (PQsetnonblocking(c->conn, 0) != 0)
+			copy_in_send_failed(c, true);
+		c->copying = false;
+		ncopying--;
+		ended[i] = true;
+	}
+
+	/* Each COPY's own result: its row count, or why it failed. */
 	copy_ending = true;
 	PG_TRY();
 	{
-		gang_wait_all_counting(gang, count, content, 0);
+		gang_wait_all_keeping_commands(g, results);
 	}
 	PG_FINALLY();
 	{
@@ -5999,38 +6170,16 @@ copy_in_wait(int content, uint64 *count)
 		copy_context_arg = NULL;
 	}
 	PG_END_TRY();
-}
 
-uint64
-GpCopyInEnd(void)
-{
-	GpSegmentConn *c = copying;
-	uint64		count = 0;
-
-	Assert(c != NULL);
-	copying = NULL;
-
-	/*
-	 * Cloudberry's, as it begins to end a COPY to the segments
-	 * (cdbCopyEndInternal(), cdbcopy.c): here as each segment's COPY ends.
-	 */
-	(void) GP_FAULT("cdb_copy_end_internal_start");
-
-	if (PQputCopyEnd(c->conn, NULL) != 1)
+	for (int i = 0; i < g->nconns; i++)
 	{
-		char	   *msg = pstrdup(PQerrorMessage(c->conn));
-		int			content = c->content;
-
-		gang_close();
-		ereport(ERROR,
-				(errcode(ERRCODE_CONNECTION_FAILURE),
-				 errmsg("could not finish sending rows to segment %d", content),
-				 errdetail_internal("%s", msg)));
+		if (ended[i])
+			counts[n++] = results[i] ? strtou64(PQcmdTuples(results[i]), NULL, 10) : 0;
+		if (results[i] != NULL)
+			PQclear(results[i]);
 	}
-
-	/* The COPY's own result: its row count, or why it failed. */
-	copy_in_wait(c->content, &count);
-	return count;
+	pfree(results);
+	pfree(ended);
 }
 
 /* ------------------------------------------------------------------------- */
