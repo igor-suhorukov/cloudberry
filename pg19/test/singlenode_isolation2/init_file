@@ -9,4 +9,11 @@
 m/^ERROR:  could not open relation with OID \d+/
 s/OID \d+/OID NNNN/
 
+# PostgreSQL 19's error for a toast table whose index is invalid ends with
+# its OID, which Cloudberry's init file masks only before the source location
+# Cloudberry's error ends in, "(toasting.c:...)", where PostgreSQL 19's ends
+# (invalidated_toast_index).
+m/^ERROR:  no valid index found for toast relation with Oid \d+$/
+s/with Oid \d+$/with Oid OID/
+
 -- end_matchsubs

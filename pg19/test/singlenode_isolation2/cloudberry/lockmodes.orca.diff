@@ -1,0 +1,592 @@
+@@
++  'child' => [
++    {
++      'id' => 2,
++      'parent' => 1,
++      'short' => 'Seq Scan on t_lockmods'
++    }
++  ],
+@@
+-  'short' => 'Seq Scan on t_lockmods'
++  'short' => 'LockRows'
+@@
+- locktype | mode            | granted | relation   
+-----------+-----------------+---------+------------
+- relation | AccessShareLock | t       | t_lockmods 
+- relation | ExclusiveLock   | t       | t_lockmods 
+-(2 rows)
++ locktype | mode         | granted | relation   
++----------+--------------+---------+------------
++ relation | RowShareLock | t       | t_lockmods 
++(1 row)
+@@
++  'child' => [
++    {
++      'id' => 2,
++      'parent' => 1,
++      'short' => 'Seq Scan on t_lockmods'
++    }
++  ],
+@@
+-  'short' => 'Seq Scan on t_lockmods'
++  'short' => 'LockRows'
+@@
+- locktype | mode            | granted | relation   
+-----------+-----------------+---------+------------
+- relation | AccessShareLock | t       | t_lockmods 
+- relation | ExclusiveLock   | t       | t_lockmods 
+-(2 rows)
++ locktype | mode         | granted | relation   
++----------+--------------+---------+------------
++ relation | RowShareLock | t       | t_lockmods 
++(1 row)
+@@
++  'child' => [
++    {
++      'id' => 2,
++      'parent' => 1,
++      'short' => 'Seq Scan on t_lockmods'
++    }
++  ],
+@@
+-  'short' => 'Seq Scan on t_lockmods'
++  'short' => 'LockRows'
+@@
+- locktype | mode            | granted | relation   
+-----------+-----------------+---------+------------
+- relation | AccessShareLock | t       | t_lockmods 
+- relation | ExclusiveLock   | t       | t_lockmods 
+-(2 rows)
++ locktype | mode         | granted | relation   
++----------+--------------+---------+------------
++ relation | RowShareLock | t       | t_lockmods 
++(1 row)
+@@
++  'child' => [
++    {
++      'id' => 2,
++      'parent' => 1,
++      'short' => 'Seq Scan on t_lockmods'
++    }
++  ],
+@@
+-  'short' => 'Seq Scan on t_lockmods'
++  'short' => 'LockRows'
+@@
+- locktype | mode            | granted | relation   
+-----------+-----------------+---------+------------
+- relation | AccessShareLock | t       | t_lockmods 
+- relation | ExclusiveLock   | t       | t_lockmods 
+-(2 rows)
++ locktype | mode         | granted | relation   
++----------+--------------+---------+------------
++ relation | RowShareLock | t       | t_lockmods 
++(1 row)
+@@
+-      'id' => 2,
+-      'parent' => 1,
+-      'short' => 'Seq Scan on t_lockmods1'
+-    },
+-    {
+@@
++          'id' => 3,
++          'parent' => 2,
++          'short' => 'Seq Scan on t_lockmods1'
++        },
++        {
+@@
+-          'parent' => 3,
++          'parent' => 2,
+@@
+-      'id' => 3,
++      'id' => 2,
+@@
+-      'short' => 'Materialize'
++      'short' => 'Nested Loop'
+@@
+-  'short' => 'Nested Loop'
++  'short' => 'LockRows'
+@@
+- locktype | mode            | granted | relation    
+-----------+-----------------+---------+-------------
+- relation | AccessShareLock | t       | t_lockmods  
+- relation | AccessShareLock | t       | t_lockmods1 
+- relation | ExclusiveLock   | t       | t_lockmods  
+- relation | ExclusiveLock   | t       | t_lockmods1 
+-(4 rows)
++ locktype | mode         | granted | relation    
++----------+--------------+---------+-------------
++ relation | RowShareLock | t       | t_lockmods  
++ relation | RowShareLock | t       | t_lockmods1 
++(2 rows)
+@@
+-      'id' => 2,
+-      'parent' => 1,
+-      'short' => 'Seq Scan on t_lockmods1'
+-    },
+-    {
+@@
++          'id' => 3,
++          'parent' => 2,
++          'short' => 'Seq Scan on t_lockmods1'
++        },
++        {
+@@
+-          'parent' => 3,
++          'parent' => 2,
+@@
+-      'id' => 3,
++      'id' => 2,
+@@
+-      'short' => 'Materialize'
++      'short' => 'Nested Loop'
+@@
+-  'short' => 'Nested Loop'
++  'short' => 'LockRows'
+@@
+- locktype | mode            | granted | relation    
+-----------+-----------------+---------+-------------
+- relation | AccessShareLock | t       | t_lockmods  
+- relation | AccessShareLock | t       | t_lockmods1 
+- relation | ExclusiveLock   | t       | t_lockmods  
+- relation | ExclusiveLock   | t       | t_lockmods1 
+-(4 rows)
++ locktype | mode         | granted | relation    
++----------+--------------+---------+-------------
++ relation | RowShareLock | t       | t_lockmods  
++ relation | RowShareLock | t       | t_lockmods1 
++(2 rows)
+@@
+-      'id' => 2,
+-      'parent' => 1,
+-      'short' => 'Seq Scan on t_lockmods1'
+-    },
+-    {
+@@
++          'id' => 3,
++          'parent' => 2,
++          'short' => 'Seq Scan on t_lockmods1'
++        },
++        {
+@@
+-          'parent' => 3,
++          'parent' => 2,
+@@
+-      'id' => 3,
++      'id' => 2,
+@@
+-      'short' => 'Materialize'
++      'short' => 'Nested Loop'
+@@
+-  'short' => 'Nested Loop'
++  'short' => 'LockRows'
+@@
+- locktype | mode            | granted | relation    
+-----------+-----------------+---------+-------------
+- relation | AccessShareLock | t       | t_lockmods  
+- relation | AccessShareLock | t       | t_lockmods1 
+- relation | ExclusiveLock   | t       | t_lockmods  
+- relation | ExclusiveLock   | t       | t_lockmods1 
+-(4 rows)
++ locktype | mode         | granted | relation    
++----------+--------------+---------+-------------
++ relation | RowShareLock | t       | t_lockmods  
++ relation | RowShareLock | t       | t_lockmods1 
++(2 rows)
+@@
+-      'id' => 2,
+-      'parent' => 1,
+-      'short' => 'Seq Scan on t_lockmods1'
+-    },
+-    {
+@@
++          'id' => 3,
++          'parent' => 2,
++          'short' => 'Seq Scan on t_lockmods1'
++        },
++        {
+@@
+-          'parent' => 3,
++          'parent' => 2,
+@@
+-      'id' => 3,
++      'id' => 2,
+@@
+-      'short' => 'Materialize'
++      'short' => 'Nested Loop'
+@@
+-  'short' => 'Nested Loop'
++  'short' => 'LockRows'
+@@
+- locktype | mode            | granted | relation    
+-----------+-----------------+---------+-------------
+- relation | AccessShareLock | t       | t_lockmods  
+- relation | AccessShareLock | t       | t_lockmods1 
+- relation | ExclusiveLock   | t       | t_lockmods  
+- relation | ExclusiveLock   | t       | t_lockmods1 
+-(4 rows)
++ locktype | mode         | granted | relation    
++----------+--------------+---------+-------------
++ relation | RowShareLock | t       | t_lockmods  
++ relation | RowShareLock | t       | t_lockmods1 
++(2 rows)
+@@
+- locktype | mode          | granted | relation   
+-----------+---------------+---------+------------
+- relation | ExclusiveLock | t       | t_lockmods 
++ locktype | mode         | granted | relation   
++----------+--------------+---------+------------
++ relation | RowShareLock | t       | t_lockmods 
+@@
+- locktype | mode          | granted | relation   
+-----------+---------------+---------+------------
+- relation | ExclusiveLock | t       | t_lockmods 
++ locktype | mode         | granted | relation   
++----------+--------------+---------+------------
++ relation | RowShareLock | t       | t_lockmods 
+@@
+- locktype | mode          | granted | relation   
+-----------+---------------+---------+------------
+- relation | ExclusiveLock | t       | t_lockmods 
++ locktype | mode         | granted | relation   
++----------+--------------+---------+------------
++ relation | RowShareLock | t       | t_lockmods 
+@@
+- locktype | mode          | granted | relation   
+-----------+---------------+---------+------------
+- relation | ExclusiveLock | t       | t_lockmods 
++ locktype | mode         | granted | relation   
++----------+--------------+---------+------------
++ relation | RowShareLock | t       | t_lockmods 
+@@
++  'child' => [
++    {
++      'id' => 2,
++      'parent' => 1,
++      'short' => 'Seq Scan on t_lockmods_ao'
++    }
++  ],
+@@
+-  'short' => 'Seq Scan on t_lockmods_ao'
++  'short' => 'LockRows'
+@@
+- locktype | mode            | granted | relation      
+-----------+-----------------+---------+---------------
+- relation | AccessShareLock | t       | t_lockmods_ao 
+- relation | ExclusiveLock   | t       | t_lockmods_ao 
+-(2 rows)
++ locktype | mode          | granted | relation      
++----------+---------------+---------+---------------
++ relation | ExclusiveLock | t       | t_lockmods_ao 
++(1 row)
+@@
++  'child' => [
++    {
++      'id' => 2,
++      'parent' => 1,
++      'short' => 'Seq Scan on t_lockmods_ao'
++    }
++  ],
+@@
+-  'short' => 'Seq Scan on t_lockmods_ao'
++  'short' => 'LockRows'
+@@
+- locktype | mode            | granted | relation      
+-----------+-----------------+---------+---------------
+- relation | AccessShareLock | t       | t_lockmods_ao 
+- relation | ExclusiveLock   | t       | t_lockmods_ao 
+-(2 rows)
++ locktype | mode          | granted | relation      
++----------+---------------+---------+---------------
++ relation | ExclusiveLock | t       | t_lockmods_ao 
++(1 row)
+@@
++  'child' => [
++    {
++      'id' => 2,
++      'parent' => 1,
++      'short' => 'Seq Scan on t_lockmods_ao'
++    }
++  ],
+@@
+-  'short' => 'Seq Scan on t_lockmods_ao'
++  'short' => 'LockRows'
+@@
+- locktype | mode            | granted | relation      
+-----------+-----------------+---------+---------------
+- relation | AccessShareLock | t       | t_lockmods_ao 
+- relation | ExclusiveLock   | t       | t_lockmods_ao 
+-(2 rows)
++ locktype | mode          | granted | relation      
++----------+---------------+---------+---------------
++ relation | ExclusiveLock | t       | t_lockmods_ao 
++(1 row)
+@@
++  'child' => [
++    {
++      'id' => 2,
++      'parent' => 1,
++      'short' => 'Seq Scan on t_lockmods_ao'
++    }
++  ],
+@@
+-  'short' => 'Seq Scan on t_lockmods_ao'
++  'short' => 'LockRows'
+@@
+- locktype | mode            | granted | relation      
+-----------+-----------------+---------+---------------
+- relation | AccessShareLock | t       | t_lockmods_ao 
+- relation | ExclusiveLock   | t       | t_lockmods_ao 
+-(2 rows)
++ locktype | mode          | granted | relation      
++----------+---------------+---------+---------------
++ relation | ExclusiveLock | t       | t_lockmods_ao 
++(1 row)
+@@
++      'child' => [
++        {
++          'id' => 3,
++          'parent' => 2,
++          'short' => 'Seq Scan on t_lockmods_ao1'
++        },
++        {
++          'id' => 4,
++          'parent' => 2,
++          'short' => 'Seq Scan on t_lockmods_ao'
++        }
++      ],
+@@
+-      'short' => 'Seq Scan on t_lockmods_ao'
+-    },
+-    {
+-      'id' => 3,
+-      'parent' => 1,
+-      'short' => 'Seq Scan on t_lockmods_ao1'
++      'short' => 'Nested Loop'
+@@
+-  'short' => 'Nested Loop'
++  'short' => 'LockRows'
+@@
+- locktype | mode            | granted | relation       
+-----------+-----------------+---------+----------------
+- relation | AccessShareLock | t       | t_lockmods_ao  
+- relation | AccessShareLock | t       | t_lockmods_ao1 
+- relation | ExclusiveLock   | t       | t_lockmods_ao  
+- relation | ExclusiveLock   | t       | t_lockmods_ao1 
+-(4 rows)
++ locktype | mode          | granted | relation       
++----------+---------------+---------+----------------
++ relation | ExclusiveLock | t       | t_lockmods_ao  
++ relation | ExclusiveLock | t       | t_lockmods_ao1 
++(2 rows)
+@@
++      'child' => [
++        {
++          'id' => 3,
++          'parent' => 2,
++          'short' => 'Seq Scan on t_lockmods_ao1'
++        },
++        {
++          'id' => 4,
++          'parent' => 2,
++          'short' => 'Seq Scan on t_lockmods_ao'
++        }
++      ],
+@@
+-      'short' => 'Seq Scan on t_lockmods_ao'
+-    },
+-    {
+-      'id' => 3,
+-      'parent' => 1,
+-      'short' => 'Seq Scan on t_lockmods_ao1'
++      'short' => 'Nested Loop'
+@@
+-  'short' => 'Nested Loop'
++  'short' => 'LockRows'
+@@
+- locktype | mode            | granted | relation       
+-----------+-----------------+---------+----------------
+- relation | AccessShareLock | t       | t_lockmods_ao  
+- relation | AccessShareLock | t       | t_lockmods_ao1 
+- relation | ExclusiveLock   | t       | t_lockmods_ao  
+- relation | ExclusiveLock   | t       | t_lockmods_ao1 
+-(4 rows)
++ locktype | mode          | granted | relation       
++----------+---------------+---------+----------------
++ relation | ExclusiveLock | t       | t_lockmods_ao  
++ relation | ExclusiveLock | t       | t_lockmods_ao1 
++(2 rows)
+@@
++      'child' => [
++        {
++          'id' => 3,
++          'parent' => 2,
++          'short' => 'Seq Scan on t_lockmods_ao1'
++        },
++        {
++          'id' => 4,
++          'parent' => 2,
++          'short' => 'Seq Scan on t_lockmods_ao'
++        }
++      ],
+@@
+-      'short' => 'Seq Scan on t_lockmods_ao'
+-    },
+-    {
+-      'id' => 3,
+-      'parent' => 1,
+-      'short' => 'Seq Scan on t_lockmods_ao1'
++      'short' => 'Nested Loop'
+@@
+-  'short' => 'Nested Loop'
++  'short' => 'LockRows'
+@@
+- locktype | mode            | granted | relation       
+-----------+-----------------+---------+----------------
+- relation | AccessShareLock | t       | t_lockmods_ao  
+- relation | AccessShareLock | t       | t_lockmods_ao1 
+- relation | ExclusiveLock   | t       | t_lockmods_ao  
+- relation | ExclusiveLock   | t       | t_lockmods_ao1 
+-(4 rows)
++ locktype | mode          | granted | relation       
++----------+---------------+---------+----------------
++ relation | ExclusiveLock | t       | t_lockmods_ao  
++ relation | ExclusiveLock | t       | t_lockmods_ao1 
++(2 rows)
+@@
++      'child' => [
++        {
++          'id' => 3,
++          'parent' => 2,
++          'short' => 'Seq Scan on t_lockmods_ao1'
++        },
++        {
++          'id' => 4,
++          'parent' => 2,
++          'short' => 'Seq Scan on t_lockmods_ao'
++        }
++      ],
+@@
+-      'short' => 'Seq Scan on t_lockmods_ao'
+-    },
+-    {
+-      'id' => 3,
+-      'parent' => 1,
+-      'short' => 'Seq Scan on t_lockmods_ao1'
++      'short' => 'Nested Loop'
+@@
+-  'short' => 'Nested Loop'
++  'short' => 'LockRows'
+@@
+- locktype | mode            | granted | relation       
+-----------+-----------------+---------+----------------
+- relation | AccessShareLock | t       | t_lockmods_ao  
+- relation | AccessShareLock | t       | t_lockmods_ao1 
+- relation | ExclusiveLock   | t       | t_lockmods_ao  
+- relation | ExclusiveLock   | t       | t_lockmods_ao1 
+-(4 rows)
++ locktype | mode          | granted | relation       
++----------+---------------+---------+----------------
++ relation | ExclusiveLock | t       | t_lockmods_ao  
++ relation | ExclusiveLock | t       | t_lockmods_ao1 
++(2 rows)
+@@
++          'child' => [
++            {
++              'id' => 4,
++              'parent' => 3,
++              'short' => 'Seq Scan on t_lockmods'
++            }
++          ],
+@@
+-          'short' => 'Seq Scan on t_lockmods'
++          'short' => 'Sort'
+@@
+-      'short' => 'Sort'
++      'short' => 'LockRows'
+@@
+- locktype | mode            | granted | relation   
+-----------+-----------------+---------+------------
+- relation | AccessShareLock | t       | t_lockmods 
+- relation | ExclusiveLock   | t       | t_lockmods 
+-(2 rows)
++ locktype | mode         | granted | relation   
++----------+--------------+---------+------------
++ relation | RowShareLock | t       | t_lockmods 
++(1 row)
+@@
++  'child' => [
++    {
++      'id' => 2,
++      'parent' => 1,
++      'short' => 'Seq Scan on t_lockmods_rep'
++    }
++  ],
+@@
+-  'short' => 'Seq Scan on t_lockmods_rep'
++  'short' => 'LockRows'
+@@
+- locktype | mode            | granted | relation       
+-----------+-----------------+---------+----------------
+- relation | AccessShareLock | t       | t_lockmods_rep 
+- relation | ExclusiveLock   | t       | t_lockmods_rep 
+-(2 rows)
++ locktype | mode         | granted | relation       
++----------+--------------+---------+----------------
++ relation | RowShareLock | t       | t_lockmods_rep 
++(1 row)
+@@
++      'child' => [
++        {
++          'id' => 3,
++          'parent' => 2,
++          'short' => 'Seq Scan on t_lockmods'
++        }
++      ],
+@@
+-      'short' => 'Seq Scan on t_lockmods'
++      'short' => 'Sort'
+@@
+-  'short' => 'Sort'
++  'short' => 'LockRows'
+@@
+- locktype | mode            | granted | relation   
+-----------+-----------------+---------+------------
+- relation | AccessShareLock | t       | t_lockmods 
+- relation | ExclusiveLock   | t       | t_lockmods 
+-(2 rows)
++ locktype | mode         | granted | relation   
++----------+--------------+---------+------------
++ relation | RowShareLock | t       | t_lockmods 
++(1 row)
+@@
++FAILED:  Forked command is not blocking; got output: ERROR:  could not obtain lock on row in relation "t_lockmods"
+@@
+- c 
+----
+- 1 
+- 2 
+- 3 
+- 4 
+- 5 
+-(5 rows)
++FAILED:  Execution failed
+@@
++FAILED:  Forked command is not blocking; got output: c 
++---
++(0 rows)
+@@
+- c 
+----
+- 1 
+- 2 
+- 3 
+- 4 
+- 5 
+-(5 rows)
++FAILED:  Execution failed
+@@
++ relation | AccessShareLock  | t       | t_lockmods_part_tbl_upd_del         
+@@
+-(1 row)
++(2 rows)

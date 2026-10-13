@@ -1,0 +1,9 @@
+@@
+-         Recheck Cond: ((b < 3) AND (a = 53))       
++         Recheck Cond: ((a = 53) AND (b < 3))       
+@@
+-               ->  Bitmap Index Scan on i_bmtest2_b 
+-                     Index Cond: (b < 3)            
+@@
++               ->  Bitmap Index Scan on i_bmtest2_b 
++                     Index Cond: (b < 3)            

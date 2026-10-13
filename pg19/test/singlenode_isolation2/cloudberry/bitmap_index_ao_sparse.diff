@@ -1,0 +1,7 @@
+@@
+- Seq Scan on aocs_sparse                                                   
+-   Filter: ((id >= 97) AND (id <= 99) AND (gp_segment_id = '-1'::integer)) 
++ Gather                                                                          
++   Workers Planned: 1                                                            
++   ->  Seq Scan on aocs_sparse                                          
++         Filter: ((id >= 97) AND (id <= 99) AND (gp_segment_id = '-1'::integer)) 

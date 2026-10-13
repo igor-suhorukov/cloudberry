@@ -91,9 +91,9 @@ postgis_regress        planner   10   PASSES=planner MEM=2600
 hooks                  -         28   MEM=300
 task                   -         32   MEM=300
 pax_gtest              -         10   MEM=400
-singlenode_isolation2  orca      17   PASSES=orca MEM=300
+singlenode_isolation2  orca      78   PASSES=orca MEM=1700
 postgis                -         10   MEM=700
-singlenode_isolation2  planner   11   PASSES=planner MEM=300
+singlenode_isolation2  planner   68   PASSES=planner MEM=1300
 security               -         20   MEM=300
 dirtable               -         32   MEM=900
 memprot                -          9   MEM=600

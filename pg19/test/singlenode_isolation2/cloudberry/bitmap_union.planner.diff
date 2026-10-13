@@ -1,0 +1,15 @@
+@@
+- Aggregate                                          
+-   ->  Bitmap Heap Scan on bmunion                  
+-         Recheck Cond: ((b < 3) AND (a = 53))       
+-         ->  BitmapAnd                              
+-               ->  Bitmap Index Scan on i_bmtest2_b 
+-                     Index Cond: (b < 3)            
+-               ->  Bitmap Index Scan on i_bmtest2_a 
+-                     Index Cond: (a = 53)           
++ Aggregate                                    
++   ->  Bitmap Heap Scan on bmunion            
++         Recheck Cond: (a = 53)               
++         Filter: (b < 3)                      
++         ->  Bitmap Index Scan on i_bmtest2_a 
++               Index Cond: (a = 53)           

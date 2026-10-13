@@ -7,13 +7,44 @@ it -- the lines removed and added, hunk by hunk, with no file names or line
 numbers -- named for the expected output it differs from; a name with a pass
 in it (test.orca.diff) holds for that pass alone.  run.sh counts a test as
 passing when its difference is exactly the file's.  The differences below
-are the same in both passes, but for runaway_query's.
+are the same in both passes, but for bitmap_union's, lockmodes' and
+runaway_query's.
 
-drop_rename.diff
-    Its last statement reads pg_class on every segment through
-    gp_dist_random(), which arrives with M2's dispatch.  One statement; the
-    three concurrent DROPs before it, which the test is about, answer as in
-    Cloudberry.
+bitmap_index_ao_sparse.diff
+    One EXPLAIN's plan and nothing else: PostgreSQL 19's planner reads the
+    column table of two million rows with a parallel scan, one worker under
+    a Gather, where Cloudberry's single node, which plans no parallel scan
+    unless asked (enable_parallel), has a Seq Scan.  The counts through the
+    bitmap index over blocks far apart, which the test is for, are
+    Cloudberry's.
+
+bitmap_union.planner.diff, bitmap_union.orca.diff
+    The EXPLAIN's plan; the count is Cloudberry's in both passes.  The test
+    sets Cloudberry's fault simulate_bitmap_and, by which its planner is
+    made to choose a BitmapAnd of the two bitmap indexes: PostgreSQL 19's
+    planner, which no extension can make cost one, reads one index's bitmap
+    and filters by the other column.  ORCA chooses the BitmapAnd by itself,
+    and names the two conditions and the two scans in the other order.
+
+lockmodes.planner.diff, lockmodes.orca.diff
+    A locking clause, and nothing else: every lock of an INSERT, UPDATE,
+    DELETE or plain SELECT is Cloudberry's.  For one, Cloudberry's single
+    node takes what its coordinator takes without the global deadlock
+    detector: the table's ExclusiveLock, as its parser opens it, and no row
+    is locked -- its plans have no LockRows, and NOWAIT and SKIP LOCKED
+    change nothing, the second session waiting for the table.  The port's
+    one node is
+    PostgreSQL there, whose rows can be locked and no segment's are to be:
+    a heap table is held in RowShareLock and its rows are locked under a
+    LockRows, so FOR UPDATE NOWAIT fails at once on a locked row and SKIP
+    LOCKED returns the rest, where the test has both wait.  An
+    append-optimized table, no row of which anyone can lock, is held in
+    ExclusiveLock as Cloudberry holds it (gp_ao.c, gp_ao_query_lockmode());
+    what differs there is incidental, the AccessShareLock under which
+    Cloudberry's parser looks the table up first, and the plan's LockRows.
+    The orca pass has one lock more: a DELETE of one partition holds
+    AccessShareLock on the partitioned table too, which ORCA reads the
+    partition's place in.
 
 pg_views_concurrent_drop.diff
     A view dropped in one session while another reads its definition from
@@ -39,3 +70,26 @@ runaway_query.orca.diff
     isolation2 output under ORCA has it (runaway_query_optimizer.out); this
     suite's expected output is Cloudberry's single node's, which plans with
     the planner, and shows its plan.
+
+uao/max_concurrency_row and _column, uao/max_concurrency2_row and _column,
+uao/modcount_vacuum_row and _column, uao/select_after_vacuum_row and _column,
+uao/select_while_vacuum_serializable2_row and _column,
+uao/vacuum_self_function_row and _column, uao/vacuum_self_serializable_row
+and _column, uao/vacuum_self_serializable2_row and _column,
+uao/vacuum_self_serializable3_row and _column
+    The numbers of an append-optimized table's segment files, and in
+    max_concurrency2 what follows from them.  Cloudberry keeps segment file
+    0 for a session in utility mode, and its single node is one: the first
+    rows of a table go to file 0, a VACUUM moves them to file 1, and a table
+    may have 128 files, 0 to 127.  gp_ao has no such file -- a writer takes
+    a file from 1, on one node as on a segment (ao_dml.c; the isolation2
+    suite's uao/compaction_utility has the same difference for a segment's
+    own session) -- so the rows are in file 1, a VACUUM moves them to file
+    2, and a table has 127.  The counts of rows, the states and the
+    modification counts beside each number are Cloudberry's, file for file.
+    max_concurrency: the 127 sessions' files are 1 to 127, not 0 to 126.
+    max_concurrency2: its 128th writer at once, which Cloudberry's single
+    node gives file 127, is refused -- "could not find segment file to use
+    for inserting into relation", all 127 files being written by other
+    transactions -- as a 128th is refused on a cluster, in Cloudberry and
+    here alike (the isolation2 suite's form of the test).
