@@ -13,12 +13,40 @@ bitmap_index_ao_sparse, bitmap_index_concurrent, bitmap_union
   bitmap index, index or sequential scan, or its BitmapAnd.  The rows are
   Cloudberry's.
 
+bitmap_index_inspect
+  What the pages of a bitmap index of a PAX table hold, for the same reason
+  as bitmap_index_crash below: the port numbers a PAX file's rows 291 to a
+  block of its TIDs (pax_tid.h), a file's number in the block's upper bits,
+  where Cloudberry's PAX numbers a file's rows on from one another.  So each
+  value's 1,000 rows, one INSERT's and so one file's, are three blocks of
+  291 rows and one of 127: in the value's bitmap page, for each full block
+  four words of ones, the 35 bits left of it and a fill of 1,019 empty
+  words to the next block, nine words where PAX's expected output has
+  three; and the last TIDs of its list-of-values item are the fourth
+  block's, 196672 to 196735 for the first file and 268632128 on for the
+  second.  The metapage, the errors of a page that is not what was asked
+  for, and the first item are PAX's.
+
 bitmap_index_crash
   The size in pages of a bitmap index of a PAX table on a segment after
   5,000 rows: 34, where PAX's expected output has 29 -- the port numbers a
   PAX file's rows in a TID layout of its own (pax/src/pax_tid.h), which the
   index's words cover more thinly.  The index answers alike after the
   segment's crash and recovery.
+
+modify_table_data_corrupt_optimizer, which the orca pass is compared with
+  The plans, and the outcome of the two UPDATEs of a join.  PAX's expected
+  output has Cloudberry's planner's plan for both, and its outcome -- the
+  first refused, "distribution key of the tuple (0, 1) doesn't belong to
+  current segment", and the second UPDATE 2 -- where Cloudberry's own copy
+  of the test has ORCA's.  The port's ORCA plans them on a PAX table as it
+  plans them on a heap table, with what Cloudberry's own copy expects of
+  ORCA: UPDATE 1, and the second refused, in Cloudberry's words.  The rest
+  is the isolation2 suite's difference of the same name: the port's
+  Dispatch above the ModifyTable, the slices numbered from it, no Result of
+  a One-Time Filter above the split update, and a hash key qualified with
+  its table.  Under the planner the test answers as Cloudberry's own copy
+  does, and that suite's difference holds.
 
 pax/compaction_full_stats
   The pages and rows of a table and its index on the coordinator after
@@ -33,6 +61,14 @@ pax/snapshot_index_corruption
   another transaction updated it and built an index: i = 100, as a heap
   table's index answers, where PAX's expected output has no row -- a
   difference PAX's own test marks FIXME.
+
+vacuum_full_interrupt
+  EXPLAIN's plan, which the session makes with the planner in either pass:
+  the coordinator's EXPLAIN shows no scan beneath its Gather Motion, where
+  PAX's expected output shows the Bitmap Heap Scan its segments run -- the
+  isolation2 suite's reason for the test, whose own expected output has an
+  Index Scan there.  The rest is PAX's: segment 0's VACUUM FULL, cancelled
+  once its relation's files are swapped, leaves its pg_class row as it was.
 
 Tests of Cloudberry's schedule whose copy here is an older one than
 Cloudberry's own, so that the isolation2 suite's difference does not

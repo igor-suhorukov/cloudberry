@@ -56,8 +56,8 @@ greenplum              planner  106   PASSES=planner MEM=17500
 pax_regress            orca     200   PASSES=orca MEM=20000
 pax_regress            planner  180   PASSES=planner MEM=18500
 resgroup_v1            -        571   MEM=1500
-pax_isolation2         orca     160   PASSES=orca MEM=14500
-pax_isolation2         planner  160   PASSES=planner MEM=14500
+pax_isolation2         orca     160   PASSES=orca MEM=17500
+pax_isolation2         planner  160   PASSES=planner MEM=17500
 singlenode             orca     165   PASSES=orca MEM=5500
 pax                    toast     78   PAX_GROUP=toast MEM=5000
 pax                    -         20   PAX_GROUP=main MEM=2200

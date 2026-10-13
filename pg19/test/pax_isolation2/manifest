@@ -17,32 +17,37 @@
 #         what, as the test met it on a cluster of its own
 #
 # PAX's own tests run in the groups pax and reindex.  Cloudberry's tests run
-# in the group the isolation2 suite gives them where it runs them; the
-# schedule's others, which the isolation2 suite does not list either, are
-# skipped with what each needs: most wait for a fault the port has no place
-# for, a Cloudberry function or setting, or an append-optimized table's
-# segment files as Cloudberry keeps them.
-skip gpdispatch  the faults make_dispatch_result_error, cdb_copy_end_internal_start and shareinput_writer_notifyready, of Cloudberry's dispatcher, which the port's has no place for; it waits for them
-skip check_gxid  gp_get_next_gxid(), a function of Cloudberry's core the port has not
-skip checkpoint_dtx_info  the faults after_xlog_xact_distributed_commit and keep_log_seg, in PostgreSQL's commit and checkpoint, which the port has no place for; it waits for them
-skip autovacuum-analyze  the faults gp_pgstat_report_on_master, analyze_after_hold_lock, auto_vac_worker_* and analyze_finished_one_relation, in PostgreSQL's autovacuum and ANALYZE; it waits for them
+# in the group the isolation2 suite gives them, or where this schedule has
+# what that group begins with: the tests of a VACUUM that could not drop an
+# append-optimized table's segment files in misc1, after disable_autovacuum,
+# and instr_in_shmem_terminate there too, after instr_in_shmem_setup.  The
+# tests that PANIC a node are in crash, gpexpand_catalog_lock in a group of
+# its own, and terminate_in_gang_creation in mirrors2, with the two tests of
+# Cloudberry's crash schedule that this schedule has.  The thirteen skipped
+# are the twelve the isolation2 suite skips too, for its reason, and
+# concurrent_index_creation_should_not_deadlock, whose copy here is the
+# test's older form.
+skip gpdispatch  gp_cte_sharing, Cloudberry's planner's sharing of a CTE (the test turns ORCA off): its ShareInputScan on segment 0, whose writer the fault shareinput_writer_notifyready holds, the port's planner route has not (Route B); it waits for the fault
+run  check_gxid                                         crash
+run  checkpoint_dtx_info                                crash
+skip autovacuum-analyze  the coordinator's autovacuum ANALYZE of distributed tables, which the port does not have: the segments report no statement's row changes to the coordinator's statistics, and no autovacuum worker there samples them; it waits for gp_pgstat_report_on_master
 run  prepared_xact_deadlock_pg_rewind                mirrors1
 run  ao_partition_lock                                 misc1
 run  select_dropped_table
-skip update_hash_col_utilitymode  differs: a session of a segment's own (0U) updates a column of the distribution key, UPDATE 0, where Cloudberry refuses it in utility mode
-skip execute_on_utilitymode  differs: an EXECUTE ON function in a session of the coordinator's own (-1U) answers gp_segment_id 0, where Cloudberry's utility mode answers -1
-skip crash_recovery_redundant_dtx  the fault checkpoint_dtx_info, in PostgreSQL's checkpoint, and mirrors; it waits for it
-skip crash_recovery_dtm  unrecognized configuration parameter "dtx_phase2_retry_second"; and the faults before_orphaned_check and after_orphaned_check, of Cloudberry's recovery process, which the port's has no place for; it waits for them
+run  update_hash_col_utilitymode
+run  execute_on_utilitymode
+run  crash_recovery_redundant_dtx                       mirrors2
+skip crash_recovery_dtm  unrecognized configuration parameter "dtx_phase2_retry_second", the seconds Cloudberry's coordinator retries a failed second phase before it PANICs: the port's coordinator retries over a new connection and leaves a part it did not reach to the recovery process, and does not PANIC
 run  unlogged_heap_tables                              misc1
 run  unlogged_appendonly_tables                      misc1
-skip udf_exception_blocks_panic_scenarios  the settings debug_dtm_action_segment and debug_dtm_action_target, and a mirror for each segment
+run  udf_exception_blocks_panic_scenarios               mirrors2
 run  ao_same_trans_truncate_crash                      misc1
-skip frozen_insert_crash  the faults appendonly_insert and insert_fastsequence_after_freeze, in the append-optimized insert; it waits for them
-skip modify_table_data_corrupt  differs: a row a session of a segment's own put on the wrong segment is updated and deleted, where Cloudberry's ModifyTable refuses it ("distribution key of the tuple doesn't belong to current segment"), and EXPLAIN's plans are the explicit write's
-skip deadlock_under_entry_db_singleton  the fault transaction_start_under_entry_db_singleton, in a transaction's start on the coordinator's singleton reader; it waits for it
-skip misc  differs: a temporary schema is named for a node's own backend (pg_temp_9, where Cloudberry's session's is pg_temp_0), and gp_toolkit.gp_check_orphaned_files
+skip frozen_insert_crash  the faults insert_fastsequence_before_freeze and insert_fastsequence_after_freeze, beside the records with which Cloudberry freezes gp_fastsequence's row for an append-optimized table's insert: gp_ao has no gp_fastsequence; it waits for the first
+run  modify_table_data_corrupt
+skip deadlock_under_entry_db_singleton  the fault transaction_start_under_entry_db_singleton, at the transaction start of the coordinator's entry-db reader that runs a volatile function's slice: the port's coordinator runs the function in the session's own backend, so there is no reader to deadlock with its writer; it waits for it
+run  misc
 run  starve_case
-skip pg_views_concurrent_drop  differs: pg_views over a view another session drops meanwhile fails, "could not open relation with OID", as PostgreSQL 19's pg_get_viewdef() does, where Cloudberry's answers no definition
+run  pg_views_concurrent_drop
 run  alter_blocks_for_update_and_viceversa
 run  drop_rename                                       misc1
 run  reader_waits_for_lock                             readers
@@ -50,28 +55,28 @@ run  resource_queue                                    queues
 run  bitmap_index_ao_sparse                            misc1
 run  resource_queue_cancel                             queues
 run  resource_queue_multi_portal                       queues
-skip pg_terminate_backend  the fault pax_insert, in PAX's insert; it waits for it
-skip gp_terminate_mpp_backends  gp_terminate_mpp_backends(), a function of Cloudberry's core the port has not
-skip gpexpand_catalog_lock  gp_expand_lock_catalog(), gpexpand's lock of Cloudberry's catalog, which the port has not
-skip reindex  the faults reindex_db and reindex_relation, in REINDEX; it waits for them
-skip reindex_gpfastsequence  Cloudberry's catalog gp_fastsequence, which the port's append-optimized tables keep in gp_ao's schema, and the fault reindex_relation
+run  pg_terminate_backend
+run  gp_terminate_mpp_backends
+run  gpexpand_catalog_lock                              catalog_lock
+run  reindex
+skip reindex_gpfastsequence  gp_fastsequence, Cloudberry's catalog of the row numbers an append-optimized table's segment files take, which gp_ao keeps in its own segment table (ao_meta.c): relation "gp_fastsequence" does not exist
 run  commit_transaction_block_checkpoint
 run  instr_in_shmem_setup                              misc1
-skip instr_in_shmem_terminate  gp_instrument_shmem_detail, Cloudberry's view of its instrumentation in shared memory, which the port has not
+run  instr_in_shmem_terminate                           misc1
 run  vacuum_recently_dead_tuple_due_to_distributed_snapshot
-skip vacuum_full_interrupt  the fault after_swap_relation_files, in VACUUM FULL's swap; it waits for it
+run  vacuum_full_interrupt
 run  distributedlog-bug
 run  distributed_snapshot
-skip gp_collation  the fault collate_locale_os_lookup, in pg_import_system_collations()
-skip ao_blkdir  differs: an append-optimized table's block directory, whose entries the port's tables make otherwise (gp_ao), at length
+run  gp_collation
+skip ao_blkdir  differs: Cloudberry's white-box test of its block directory, every dump of which is its layout's -- a directory row a minipage of up to 161 entries, where gp_ao's directory has a row a block; the isolation2 suite runs it as port/ao_blkdir
 run  bitmap_index_concurrent                           misc1
 run  bitmap_index_crash                                misc1
 run  bitmap_update_words_backup_block                  misc1
 run  bitmap_union                                      misc1
-skip bitmap_index_inspect  bm_metap(), Cloudberry's pageinspect function of a bitmap index's metapage, which the port has not
-skip fsync_ao  the faults restartpoint_guts and ao_fsync_counter, of a mirror's restartpoint and the checkpointer's sync of an append-optimized table's files, which the port has no place for, and a mirror for each segment; it waits for them
+run  bitmap_index_inspect
+skip fsync_ao  the faults restartpoint_guts and ao_fsync_counter in a mirror's checkpointer: that a mirror's replay hands its checkpointer the fsync of an append-optimized table's segment files, which Cloudberry writes outside the buffer manager; gp_ao's files are pages of the table's relation in shared buffers, with no request of their own to count; it waits for them
 run  disable_autovacuum                                misc1
-skip concurrent_index_creation_should_not_deadlock  the fault before_acquire_lock_during_create_ao_blkdir_table, in an append-optimized table's block directory's making; it waits for it
+skip concurrent_index_creation_should_not_deadlock  the fault before_acquire_lock_during_create_ao_blkdir_table, where Cloudberry makes an append-optimized table's block directory for its first index: gp_ao keeps every table's block directory in one table of its own, made with the extension, so a first index makes nothing; it waits for it.  PAX's copy is the test's older form; the later one, on the fault defineindex_before_acquire_lock, the isolation2 suite runs
 run  pax/alter_while_vacuum2                           pax
 run  pax/alter_while_vacuum                            pax
 run  pax/bitmapindex_rescan                            pax
@@ -111,16 +116,16 @@ run  pax/vacuum_self_serializable2                     pax
 run  pax/vacuum_self_serializable3                     pax
 run  pax/vacuum_self_serializable                      pax
 run  pax/vacuum_while_vacuum                           pax
-skip reorganize_after_ao_vacuum_skip_drop  differs: the segment files of an append-optimized table a VACUUM could not drop, which the port's gp_ao keeps otherwise
-skip truncate_after_ao_vacuum_skip_drop  differs: the segment files of an append-optimized table a VACUUM could not drop, which the port's gp_ao keeps otherwise
-skip mark_all_aoseg_await_drop  differs: the segment files of an append-optimized table a VACUUM could not drop, which the port's gp_ao keeps otherwise
-skip segwalrep/master_wal_switch  Cloudberry's pg_basebackup() helper, over its pg_basebackup's own options (--target-gp-dbid), and the fault base_backup_post_create_checkpoint; it waits for them
-skip terminate_in_gang_creation  the faults create_gang_in_progress and before_orphaned_check, of Cloudberry's dispatcher; it waits for them
+run  reorganize_after_ao_vacuum_skip_drop               misc1
+run  truncate_after_ao_vacuum_skip_drop                 misc1
+run  mark_all_aoseg_await_drop                          misc1
+run  segwalrep/master_wal_switch                        standby
+run  terminate_in_gang_creation                         mirrors2
 run  prepare_limit                                     standby
-skip add_column_after_vacuum_skip_drop_column  differs: the segment files of an append-optimized table a VACUUM could not drop, which the port's gp_ao keeps otherwise
-skip vacuum_after_vacuum_skip_drop_column  differs: the segment files of an append-optimized table a VACUUM could not drop, which the port's gp_ao keeps otherwise
-skip workfile_mgr_test  isolation2_regress.so, Cloudberry's library of the suite's C functions (gp_workfile_mgr_test_on_master()), which the port does not build
-skip pg_basebackup  Cloudberry's pg_basebackup() helper, over its pg_basebackup's own options (--target-gp-dbid, --force-overwrite)
+run  add_column_after_vacuum_skip_drop_column           misc1
+run  vacuum_after_vacuum_skip_drop_column               misc1
+skip workfile_mgr_test  Cloudberry's workfile manager's own C test harness (gp_workfile_mgr_test_on_master() and the workset functions of isolation2_regress.so), which the port does not build: its workfile manager is module-only (gp_workfile.c)
+run  pg_basebackup                                      mirrors3
 run  enable_autovacuum                                 misc2
 run  segwalrep/die_commit_pending_replication          mirrors3
 run  segwalrep/replication_keeps_crash                 mirrors3
@@ -146,7 +151,7 @@ run  reindex/vacuum_analyze_while_reindex_pax_btree    reindex
 run  reindex/vacuum_while_reindex_pax_bitmap           reindex
 run  reindex/vacuum_while_reindex_pax_btree            reindex
 run  reindex/vacuum_while_reindex_pax_btree_toast      reindex
-skip cancel_query  the fault zlib_decompress_after_decompress_fn, in a workfile's decompression; it waits for it
+skip cancel_query  the fault zlib_decompress_after_decompress_fn, which the ANALYZE of the zlib-compressed partition never reaches: its one row's column blocks gp_ao stores uncompressed, zlib not shortening blocks so small; it waits for it
 run  upgrade_numsegments                               misc2
 run  create_memory_accounting_tables                   memory
 run  setup_startup_memory_accounting                   memory
@@ -154,7 +159,7 @@ run  restore_memory_accounting_default                 memory
 run  runaway_query                                     memory
 run  distributed_transactions
 skip concurrent_drop_truncate_tablespace  tablespace "concurrent_tblspace" is not empty, where Cloudberry's DROP TABLESPACE meets the lock a CREATE TABLE in the tablespace took, "could not lock tablespace" -- taken as a relation's file is made there (TablespaceCreateDbspace()), where PostgreSQL 19 takes none and no hook reaches -- and the fault drop_tablespace_after_acquire_lock; it waits for it
-skip orphan_temp_table  the fault before_exec_scan, a PANIC in the executor's scan
-skip sync_guc  the setting gp_select_invisible and the faults set_variable_fault and reset_variable_fault
-skip stat_activity_extended  pg_stat_activity_extended, Cloudberry's view with a warehouse's id, which the port has not
+run  orphan_temp_table                                  crash
+skip sync_guc  its third case waits for set_variable_fault and reset_variable_fault twice on every node, a SET and a RESET reaching two processes of the session on each, where the port has one process of the session a node, and a RESET is told the segments with the next statement sent there
+run  stat_activity_extended
 run  sharedsnapshot

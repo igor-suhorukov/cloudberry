@@ -1,0 +1,15 @@
+@@
+-  'child' => [
+-    {
+-      'child' => [
+-        {
+-          'id' => 3,
+-          'parent' => 2,
+-          'short' => 'Bitmap Index Scan on vacuum_full_interrupt_idx'
+-        }
+-      ],
+-      'id' => 2,
+-      'parent' => 1,
+-      'short' => 'Bitmap Heap Scan on vacuum_full_interrupt'
+-    }
+-  ],
