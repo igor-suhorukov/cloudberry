@@ -22,8 +22,10 @@
  *	  recycled once no snapshot can see what they held.
  *
  * As Cloudberry's vacuum_ao.c does it, in its three phases.  A segment file
- * whose deleted rows are gp.appendonly_compaction_threshold percent of it or
- * more is compacted: its live rows are appended to another, with index
+ * whose deleted rows are more than gp.appendonly_compaction_threshold percent
+ * of it is compacted, and none where the setting is 0, as Cloudberry's
+ * AppendOnlyCompaction_ShouldCompact() has it: its live rows are appended to
+ * another, with index
  * entries of their own, and it is marked awaiting drop, by this transaction.
  * A snapshot older than that still reads it, through the old entries, so
  * only once the compacting transaction is older than every snapshot is it
@@ -493,8 +495,15 @@ ao_vacuum_rel(Relation rel, const VacuumParams *params,
 			continue;
 		vm = ao_visimap_load(storage_id, sf->segno, GetLatestSnapshot());
 		deleted = ao_visimap_count(vm);
-		if (deleted == 0 ||
-			deleted * 100 < (int64) gp_appendonly_compaction_threshold * sf->tupcount)
+
+		/*
+		 * The share deleted is compared as Cloudberry computes it, in
+		 * floating point (AppendOnlyCompaction_GetHideRatio()): a file is
+		 * left at the threshold itself, and every file at a threshold of 0.
+		 */
+		if (deleted == 0 || gp_appendonly_compaction_threshold == 0 ||
+			(double) deleted / (double) sf->tupcount * 100.0 <=
+			gp_appendonly_compaction_threshold)
 			continue;
 		available = ao_files_for_inserts(segfiles, nsegfiles, touched);
 		if (available < gp_appendonly_compaction_segfile_limit)

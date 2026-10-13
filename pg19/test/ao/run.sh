@@ -504,6 +504,25 @@ is "gp.appendonly_compaction turns compaction off" \
    "SELECT sum(tupcount) FROM gp_ao.segfile WHERE storage_id = gp_ao.storage_id('vd');" "10"
 is "VACUUM counts the live rows for the planner" \
    "SELECT reltuples FROM pg_class WHERE relname = 'vc';" "4000"
+# The threshold is Cloudberry's (AppendOnlyCompaction_ShouldCompact()): a
+# file is compacted where more of its rows than that are deleted, and at 0
+# no file is.  At the default, ten in a hundred are left and eleven are not.
+q "CREATE TABLE vt (a int) USING ao_row; INSERT INTO vt SELECT generate_series(1, 100);
+   DELETE FROM vt WHERE a <= 10;" > /dev/null
+q "VACUUM vt;" > /dev/null
+is "a file whose deleted rows are just the threshold's share is left" \
+   "SELECT string_agg(segno || ':' || tupcount || ':' || state, ' ' ORDER BY segno)
+      FROM gp_ao.segfile WHERE storage_id = gp_ao.storage_id('vt');" "1:100:1"
+q "DELETE FROM vt WHERE a = 11;" > /dev/null
+q "VACUUM vt;" > /dev/null
+is "and compacted with one row more deleted" \
+   "SELECT string_agg(segno || ':' || tupcount || ':' || state, ' ' ORDER BY segno)
+      FROM gp_ao.segfile WHERE storage_id = gp_ao.storage_id('vt');" "1:0:1 2:89:1"
+q "DELETE FROM vt WHERE a <= 80;" > /dev/null
+"$PSQL" -X -q -d postgres -c "SET gp.appendonly_compaction_threshold = 0" -c "VACUUM vt" > /dev/null 2>&1
+is "at a threshold of 0 VACUUM compacts no file" \
+   "SELECT string_agg(segno || ':' || tupcount || ':' || state, ' ' ORDER BY segno)
+      FROM gp_ao.segfile WHERE storage_id = gp_ao.storage_id('vt');" "1:0:1 2:89:1"
 
 ###############################################################################
 echo "8. DDL: new files are a new storage ID, and the old ones' rows go with them"

@@ -99,7 +99,8 @@ PG_MODULE_MAGIC_EXT(
 );
 
 /* Cloudberry's gp_appendonly_compaction_threshold: the percentage of a
- * segment file's rows deleted at which VACUUM compacts it. */
+ * segment file's rows deleted above which VACUUM compacts it, and at 0 it
+ * compacts none. */
 int			gp_appendonly_compaction_threshold = 10;
 
 /* Cloudberry's gp_appendonly_compaction: whether VACUUM compacts at all. */
@@ -1745,8 +1746,8 @@ _PG_init(void)
 	CB_REQUIRE_CORE("gp_ao");
 
 	DefineCustomIntVariable("gp.appendonly_compaction_threshold",
-							"Percentage of a segment file's rows deleted at which VACUUM compacts it.",
-							"Cloudberry calls this gp_appendonly_compaction_threshold.",
+							"Percentage of a segment file's rows deleted above which VACUUM compacts it.",
+							"Cloudberry calls this gp_appendonly_compaction_threshold.  At 0 a VACUUM that is not FULL compacts no file.",
 							&gp_appendonly_compaction_threshold,
 							10, 0, 100,
 							PGC_USERSET, 0,
