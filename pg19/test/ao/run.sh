@@ -624,7 +624,9 @@ for am in ao_row ao_column; do
 	out=$(q "SELECT reltuples FROM pg_class WHERE relname = '$t';
 	         SELECT string_agg(attname || ':' || coalesce(most_common_vals::text, '') || ':' || n_distinct, ' ' ORDER BY attname)
 	           FROM pg_stats WHERE tablename = '$t' AND attname IN ('g', 'm');" | tr '\n' ' ')
-	if [[ "$out" == "300000 g:{"*"}:10 m:{kept}:1 " ]] && [[ "$out" != *77* ]]; then
+	# (g's ten values are as common as each other: a sample of 300 rows may
+	# find none of them common enough to list)
+	if [[ "$out" == "300000 g:"*":10 m:{kept}:1 " ]] && [[ "$out" != *77* ]]; then
 		ok "$am: a sample by the block directory counts the live rows, and has none deleted or rolled back"
 	else
 		notok "$am: the statistics of a sample by the block directory" "$out"
