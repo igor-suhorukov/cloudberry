@@ -44,6 +44,20 @@
  * installed, the coordinator samples the gathered rows itself -- the same
  * answer, at the cost of reading every row.
  *
+ * A value over a kilobyte stays on its segment, as Cloudberry's does, which
+ * sends NULL and the length: PostgreSQL's standard statistics count such a
+ * value and its width and look at nothing else of it, so a sample of a
+ * table of documents sent them whole for nothing, and held them here.  Only
+ * of a column nothing else reads -- not one a type's own analysis has, an
+ * array's or a geometry's, nor one an index expression, a partial index's
+ * predicate or an extended statistics object takes (wide_columns()).  In
+ * the value's place the sample here has what PostgreSQL's own sample of a
+ * value stored out of line has, a pointer to it that says its length; the
+ * pointer names no table, and nothing follows one of a value so long.  The
+ * column's average width is then written as it was with the values here
+ * (note_widths()): of the values as the coordinator would hold them, which
+ * is what it holds of a row a query gathers.
+ *
  * An inheritance tree -- a partitioned table's leaves -- is sampled as one,
  * each segment sampling its members, as Cloudberry's is, rather than member
  * by member (gp_internal.sample_tree()).  A partitioned table's statistics
@@ -62,6 +76,7 @@
 
 #include <math.h>
 
+#include "access/detoast.h"
 #include "access/genam.h"
 #include "access/heapam.h"
 #include "access/htup_details.h"
@@ -76,6 +91,7 @@
 #include "catalog/namespace.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_inherits.h"
+#include "catalog/pg_statistic_ext.h"
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
 #include "commands/progress.h"
@@ -86,6 +102,7 @@
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
+#include "optimizer/optimizer.h"
 #include "parser/parse_func.h"
 #include "postmaster/autovacuum.h"
 #include "storage/bufmgr.h"
@@ -101,6 +118,7 @@
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
 #include "utils/rel.h"
+#include "varatt.h"
 #include "utils/relcache.h"
 #include "utils/sampling.h"
 #include "utils/sortsupport.h"
@@ -115,6 +133,89 @@
 #include "gp_scan.h"
 
 static analyze_sample_rows_hook_type prev_analyze_sample_rows = NULL;
+
+/*
+ * The width over which PostgreSQL's standard statistics leave a value out,
+ * and a sample leaves it on its segment: analyze.c's.
+ */
+#define WIDTH_THRESHOLD  1024
+
+/*
+ * The columns of a table whose values over WIDTH_THRESHOLD a sample may
+ * leave on the segments: those nothing reads the values of.  PostgreSQL's
+ * standard statistics count such a value and add its width, and compare
+ * the others (compute_scalar_stats(), compute_distinct_stats(),
+ * compute_trivial_stats()); a type's own analysis reads what it likes of
+ * every value -- an array's elements up to 64 kB, a tsvector's lexemes,
+ * a geometry's bounding box -- and so does the expression of an index, the
+ * predicate of a partial one, and an extended statistics object, over each
+ * sampled row.  A coordinator and its segments have the same types, indexes
+ * and statistics objects, and so answer alike: the segment decides what it
+ * sends, and the coordinator checks what comes.
+ */
+static Bitmapset *
+wide_columns(Relation rel)
+{
+	TupleDesc	desc = RelationGetDescr(rel);
+	Bitmapset  *used = NULL;	/* offset, as pull_varattnos() has them */
+	Bitmapset  *result = NULL;
+
+	foreach_oid(indexoid, RelationGetIndexList(rel))
+	{
+		Relation	index = index_open(indexoid, AccessShareLock);
+
+		pull_varattnos((Node *) RelationGetIndexExpressions(index), 1, &used);
+		pull_varattnos((Node *) RelationGetIndexPredicate(index), 1, &used);
+		index_close(index, AccessShareLock);
+	}
+	foreach_oid(statoid, RelationGetStatExtList(rel))
+	{
+		HeapTuple	tuple = SearchSysCache1(STATEXTOID, ObjectIdGetDatum(statoid));
+		Form_pg_statistic_ext form;
+		Datum		exprs;
+		bool		isnull;
+
+		if (!HeapTupleIsValid(tuple))
+			continue;
+		form = (Form_pg_statistic_ext) GETSTRUCT(tuple);
+		for (int i = 0; i < form->stxkeys.dim1; i++)
+			used = bms_add_member(used, form->stxkeys.values[i] -
+								  FirstLowInvalidHeapAttributeNumber);
+		exprs = SysCacheGetAttr(STATEXTOID, tuple,
+								Anum_pg_statistic_ext_stxexprs, &isnull);
+		if (!isnull)
+		{
+			char	   *str = TextDatumGetCString(exprs);
+
+			pull_varattnos((Node *) stringToNode(str), 1, &used);
+			pfree(str);
+		}
+		ReleaseSysCache(tuple);
+	}
+
+	/* a whole row reads every column */
+	if (bms_is_member(0 - FirstLowInvalidHeapAttributeNumber, used))
+		return NULL;
+
+	for (int i = 0; i < desc->natts; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(desc, i);
+		HeapTuple	type;
+		bool		standard;
+
+		if (att->attisdropped || att->attlen != -1 ||
+			bms_is_member(att->attnum - FirstLowInvalidHeapAttributeNumber, used))
+			continue;
+		type = SearchSysCache1(TYPEOID, ObjectIdGetDatum(att->atttypid));
+		if (!HeapTupleIsValid(type))
+			continue;
+		standard = !OidIsValid(((Form_pg_type) GETSTRUCT(type))->typanalyze);
+		ReleaseSysCache(type);
+		if (standard)
+			result = bms_add_member(result, att->attnum);
+	}
+	return result;
+}
 
 /* The segment that answers for a replicated table, as a gather of it reads. */
 static int
@@ -309,11 +410,23 @@ sampled_relation(FunctionCallInfo fcinfo)
 	return relid;
 }
 
-/* The rows and counts of a segment's sample, as the SQL functions give them. */
+/*
+ * The rows and counts of a segment's sample, as the SQL functions give them:
+ * the counts, then each row.  A row's values that stay here (wide_columns())
+ * are NULL in it, and each has a row of its own after the row's: the
+ * column's number and the value's length as it would have gone, in the two
+ * columns of the counts.  "whole": every value goes.
+ */
 static void
-put_sample(ReturnSetInfo *rsinfo, TupleDesc rowdesc, HeapTuple *rows,
-		   int numrows, double totalrows, double totaldeadrows)
+put_sample(ReturnSetInfo *rsinfo, Relation rel, HeapTuple *rows,
+		   int numrows, double totalrows, double totaldeadrows, bool whole)
 {
+	TupleDesc	rowdesc = RelationGetDescr(rel);
+	Bitmapset  *wide = whole ? NULL : wide_columns(rel);
+	Datum	   *rowvalues = palloc_array(Datum, rowdesc->natts);
+	bool	   *rownulls = palloc_array(bool, rowdesc->natts);
+	int		   *left = palloc_array(int, rowdesc->natts);
+	Size	   *leftlen = palloc_array(Size, rowdesc->natts);
 	Datum		values[3];
 	bool		nulls[3];
 
@@ -324,15 +437,57 @@ put_sample(ReturnSetInfo *rsinfo, TupleDesc rowdesc, HeapTuple *rows,
 	nulls[2] = true;
 	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 
-	nulls[0] = nulls[1] = true;
-	nulls[2] = false;
 	for (int i = 0; i < numrows; i++)
 	{
-		values[2] = heap_copy_tuple_as_datum(rows[i], rowdesc);
+		HeapTuple	row = rows[i];
+		int			nleft = 0;
+
+		if (wide != NULL)
+		{
+			int			attnum = -1;
+
+			heap_deform_tuple(row, rowdesc, rowvalues, rownulls);
+			while ((attnum = bms_next_member(wide, attnum)) >= 0)
+			{
+				Size		len;
+
+				if (rownulls[attnum - 1])
+					continue;
+				len = toast_raw_datum_size(rowvalues[attnum - 1]);
+				if (len <= WIDTH_THRESHOLD)
+					continue;
+				rownulls[attnum - 1] = true;
+				left[nleft] = attnum;
+				leftlen[nleft++] = len;
+			}
+			if (nleft > 0)
+				row = heap_form_tuple(rowdesc, rowvalues, rownulls);
+		}
+
+		values[2] = heap_copy_tuple_as_datum(row, rowdesc);
+		nulls[0] = nulls[1] = true;
+		nulls[2] = false;
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+		pfree(DatumGetPointer(values[2]));
+		if (row != rows[i])
+			heap_freetuple(row);
+
+		nulls[0] = nulls[1] = false;
+		nulls[2] = true;
+		for (int k = 0; k < nleft; k++)
+		{
+			values[0] = Float8GetDatum(left[k]);
+			values[1] = Float8GetDatum(leftlen[k]);
+			tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+		}
+
 		/* Cloudberry's fault at each row gp_acquire_sample_rows() returns */
 		(void) GP_FAULT("returned_sample_row");
 	}
+	pfree(rowvalues);
+	pfree(rownulls);
+	pfree(left);
+	pfree(leftlen);
 }
 
 /*
@@ -414,8 +569,9 @@ PG_FUNCTION_INFO_V1(gp_sample_rows);
  *
  * The first row says how many rows the segment holds, live and dead, as
  * ANALYZE estimates them; every row after it is a sampled row, as a value of
- * the table's own row type.  What it counted is the segment's pg_class's
- * too (own_counts()).
+ * the table's own row type, or says of the row before it a value that was
+ * not sent (put_sample()) -- none with "whole".  What it counted is the
+ * segment's pg_class's too (own_counts()).
  */
 Datum
 gp_sample_rows(PG_FUNCTION_ARGS)
@@ -442,8 +598,8 @@ gp_sample_rows(PG_FUNCTION_ARGS)
 	numrows = local_sample_rows(rel, func, rows, targrows, &totalrows,
 								&totaldeadrows);
 	own_counts(rel, totalpages, totalrows);
-	put_sample(rsinfo, RelationGetDescr(rel), rows, numrows, totalrows,
-			   totaldeadrows);
+	put_sample(rsinfo, rel, rows, numrows, totalrows, totaldeadrows,
+			   PG_NARGS() > 2 && !PG_ARGISNULL(2) && PG_GETARG_BOOL(2));
 	table_close(rel, AccessShareLock);
 	if (progress)
 		pgstat_progress_end_command();
@@ -587,8 +743,8 @@ gp_sample_tree(PG_FUNCTION_ARGS)
 		totaldeadrows = floor(totaldeadrows * totalpages / sampledpages + 0.5);
 	}
 
-	put_sample(rsinfo, RelationGetDescr(parent), rows, numrows, totalrows,
-			   totaldeadrows);
+	put_sample(rsinfo, parent, rows, numrows, totalrows, totaldeadrows,
+			   PG_NARGS() > 2 && !PG_ARGISNULL(2) && PG_GETARG_BOOL(2));
 	for (int i = 0; i < n; i++)
 		table_close(rels[i], NoLock);
 	table_close(parent, AccessShareLock);
@@ -605,6 +761,7 @@ typedef struct SegmentSample
 {
 	double		totalrows;
 	double		totaldeadrows;
+	bool		counted;		/* it has said those: its answer's first row */
 	int			asked;			/* the rows it was asked for */
 	List	   *rows;			/* of HeapTuple */
 } SegmentSample;
@@ -629,17 +786,124 @@ tuple_from_composite(Datum value, Oid relid)
 	return heap_copytuple(&tmp);
 }
 
-/* Does this database have gp_internal.sample_rows(), or sample_tree()? */
+/*
+ * What stands in a sampled row for a value its segment did not send: a
+ * pointer to a value stored out of line, of that length, as PostgreSQL's own
+ * sample of a toasted value has -- which says the length and is never
+ * followed, the value being over WIDTH_THRESHOLD.  It names no table.
+ */
 static bool
+value_left(Datum value, Size *len)
+{
+	struct varlena *v = (struct varlena *) DatumGetPointer(value);
+	varatt_external pointer;
+
+	if (!VARATT_IS_EXTERNAL_ONDISK(v))
+		return false;
+	VARATT_EXTERNAL_GET_POINTER(pointer, v);
+	if (OidIsValid(pointer.va_toastrelid))
+		return false;
+	*len = pointer.va_rawsize;
+	return true;
+}
+
+/* The row with that in a column's place, the segment's row freed. */
+static HeapTuple
+tuple_leaving(HeapTuple tuple, Relation rel, const Bitmapset *wide,
+			  double attnum, double len)
+{
+	TupleDesc	desc = RelationGetDescr(rel);
+	Datum	   *values = palloc_array(Datum, desc->natts);
+	bool	   *nulls = palloc_array(bool, desc->natts);
+	char		standin[TOAST_POINTER_SIZE];
+	varatt_external pointer = {0};
+	HeapTuple	result;
+
+	/* a column the segment may leave values of, as this node finds them */
+	if (attnum < 1 || attnum > desc->natts ||
+		!bms_is_member((int) attnum, wide) ||
+		len <= WIDTH_THRESHOLD || len > MaxAllocSize)
+		elog(ERROR, "a segment's sample of \"%s\" left out a value of column %d, of length %.0f",
+			 RelationGetRelationName(rel), (int) attnum, len);
+
+	pointer.va_rawsize = (int32) len;
+	pointer.va_extinfo = (uint32) len - VARHDRSZ;
+	SET_VARTAG_EXTERNAL(standin, VARTAG_ONDISK);
+	memcpy(VARDATA_EXTERNAL(standin), &pointer, sizeof(pointer));
+
+	heap_deform_tuple(tuple, desc, values, nulls);
+	values[(int) attnum - 1] = PointerGetDatum(standin);
+	nulls[(int) attnum - 1] = false;
+	result = heap_form_tuple(desc, values, nulls);
+	result->t_self = tuple->t_self;
+	result->t_tableOid = tuple->t_tableOid;
+	heap_freetuple(tuple);
+	pfree(values);
+	pfree(nulls);
+	return result;
+}
+
+/*
+ * The average width of each column whose sample has a value left on its
+ * segment, as PostgreSQL's statistics would have it with the values here:
+ * the bytes of every value over the values not NULL, a value left counted
+ * at its length.  PostgreSQL counts the pointer; what it writes is written
+ * over once it has (gp_partmerge.c).  "tree": the statistics are the
+ * tree's.
+ */
+static void
+note_widths(Relation rel, bool tree, const Bitmapset *wide, HeapTuple *rows,
+			int numrows)
+{
+	TupleDesc	desc = RelationGetDescr(rel);
+	int			attnum = -1;
+
+	while ((attnum = bms_next_member(wide, attnum)) >= 0)
+	{
+		double		total = 0;
+		int			nonnull = 0;
+		bool		any = false;
+
+		for (int i = 0; i < numrows; i++)
+		{
+			bool		isnull;
+			Datum		value = heap_getattr(rows[i], attnum, desc, &isnull);
+			Size		len;
+
+			if (isnull)
+				continue;
+			nonnull++;
+			if (value_left(value, &len))
+			{
+				total += len;
+				any = true;
+			}
+			else
+				total += VARSIZE_ANY(DatumGetPointer(value));
+		}
+		if (any)
+			GpStatWidthLater(RelationGetRelid(rel), attnum, tree,
+							 (int32) (total / (double) nonnull));
+	}
+}
+
+/*
+ * Does this database have gp_internal.sample_rows(), or sample_tree(), and
+ * with how many arguments: three, or the two of a database gp_core was made
+ * in before a sample could be asked for whole; 0 for neither.
+ */
+static int
 have_sample_function(const char *name)
 {
-	Oid			argtypes[2] = {ANYELEMENTOID, INT4OID};
+	Oid			argtypes[3] = {ANYELEMENTOID, INT4OID, BOOLOID};
+	List	   *names;
 
 	if (!OidIsValid(get_namespace_oid("gp_internal", true)))
-		return false;
-	return OidIsValid(LookupFuncName(list_make2(makeString("gp_internal"),
-												makeString(pstrdup(name))),
-									 2, argtypes, true));
+		return 0;
+	names = list_make2(makeString("gp_internal"), makeString(pstrdup(name)));
+	if (OidIsValid(LookupFuncName(names, 3, argtypes, true)))
+		return 3;
+	return OidIsValid(LookupFuncName(names, 2, argtypes, true)) ? 2 : 0;
 }
 
 /*
@@ -725,21 +989,25 @@ merge_segment_samples(SegmentSample *samples, int nsegs, HeapTuple *rows,
  * One round of asking: the query sent to the table's segments, or to those
  * listed, and what each answers taken in place of what it sent before -- a
  * segment's second sample is drawn apart from its first, so the two are not
- * added.
+ * added.  Answers whether a segment left a value out of a row (put_sample()),
+ * which is then in the row as value_left() finds it.
  */
-static void
-ask_segments(const char *sql, TupleDesc tupdesc, Oid relid, int content,
+static bool
+ask_segments(const char *sql, TupleDesc tupdesc, Relation rel, int content,
 			 const GpPolicy *policy, const int *again, int nagain,
-			 SegmentSample *samples)
+			 const Bitmapset *wide, SegmentSample *samples)
 {
 	TupleTableSlot *slot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
+	Oid			relid = RelationGetRelid(rel);
 	GpGatherState *gather;
+	bool		left = false;
 	int			from;
 
 	for (int i = 0; i < nagain; i++)
 	{
 		list_free_deep(samples[again[i]].rows);
 		samples[again[i]].rows = NIL;
+		samples[again[i]].counted = false;
 	}
 
 	gather = again != NULL
@@ -750,16 +1018,30 @@ ask_segments(const char *sql, TupleDesc tupdesc, Oid relid, int content,
 		SegmentSample *s = &samples[from];
 
 		slot_getallattrs(slot);
-		if (!slot->tts_isnull[0])
+		if (!slot->tts_isnull[2])
+			s->rows = lappend(s->rows, tuple_from_composite(slot->tts_values[2], relid));
+		else if (slot->tts_isnull[0] || slot->tts_isnull[1])
+			continue;
+		else if (!s->counted)
 		{
 			s->totalrows = DatumGetFloat8(slot->tts_values[0]);
 			s->totaldeadrows = DatumGetFloat8(slot->tts_values[1]);
+			s->counted = true;
 		}
-		else if (!slot->tts_isnull[2])
-			s->rows = lappend(s->rows, tuple_from_composite(slot->tts_values[2], relid));
+		else if (s->rows != NIL)
+		{
+			/* of the row before it: a value its segment did not send */
+			ListCell   *last = list_tail(s->rows);
+
+			lfirst(last) = tuple_leaving((HeapTuple) lfirst(last), rel, wide,
+										 DatumGetFloat8(slot->tts_values[0]),
+										 DatumGetFloat8(slot->tts_values[1]));
+			left = true;
+		}
 	}
 	GpGatherEnd(gather);
 	ExecDropSingleTupleTableSlot(slot);
+	return left;
 }
 
 /*
@@ -783,9 +1065,13 @@ ask_segments(const char *sql, TupleDesc tupdesc, Oid relid, int content,
  * target by their pages and not their rows -- is asked for as many times
  * its share as it fell short.  No segment is asked for more than the
  * target, which is what each was asked for before.
+ *
+ * "whole": every value is to come, for a sample that is a part of another
+ * PostgreSQL puts together, a member's of its tree's, whose widths could
+ * not be put right here.
  */
 static int
-gather_sample(Relation rel, GpPolicy *policy, bool tree, int elevel,
+gather_sample(Relation rel, GpPolicy *policy, bool tree, bool whole, int elevel,
 			  HeapTuple *rows, int targrows,
 			  double *totalrows, double *totaldeadrows)
 {
@@ -793,6 +1079,10 @@ gather_sample(Relation rel, GpPolicy *policy, bool tree, int elevel,
 	bool		replicated = GpPolicyIsReplicated(policy);
 	int			content = replicated ? replicated_segment(policy) : -1;
 	char	   *qualified = GpDispatchRelationName(RelationGetRelid(rel));
+	const char *function = tree ? "sample_tree" : "sample_rows";
+	int			nargs = have_sample_function(function);
+	Bitmapset  *wide = NULL;
+	bool		left = false;
 	int			nsegs;
 	SegmentSample *samples;
 	char	   *sql;
@@ -802,9 +1092,9 @@ gather_sample(Relation rel, GpPolicy *policy, bool tree, int elevel,
 	GpClusterSegments(&nsegs);
 	samples = palloc0_array(SegmentSample, nsegs);
 
-	if (have_sample_function(tree ? "sample_tree" : "sample_rows"))
+	if (nargs > 0)
 	{
-		const char *function = tree ? "sample_tree" : "sample_rows";
+		const char *all = whole && nargs > 2 ? ", true" : "";
 		TupleDesc	tupdesc = CreateTemplateTupleDesc(3);
 		int			nasked = replicated ? 1 : Max(policy->numsegments, 1);
 		int			ask = Max((targrows + nasked - 1) / nasked, 1);
@@ -817,12 +1107,17 @@ gather_sample(Relation rel, GpPolicy *policy, bool tree, int elevel,
 		TupleDescInitEntry(tupdesc, 3, "sample", RelationGetForm(rel)->reltype, -1, 0);
 		TupleDescFinalize(tupdesc);
 
-		sql = psprintf("SELECT * FROM gp_internal.%s(NULL::%s, %d)",
-					   function, qualified, ask);
+		/* what a segment may leave out, unless it was asked for all and can be */
+		if (all[0] == '\0')
+			wide = wide_columns(rel);
+
+		sql = psprintf("SELECT * FROM gp_internal.%s(NULL::%s, %d%s)",
+					   function, qualified, ask, all);
 		ereport(elevel, (errmsg("Executing SQL: %s", sql)));
 		for (int i = 0; i < nsegs; i++)
 			samples[i].asked = ask;
-		ask_segments(sql, tupdesc, relid, content, policy, NULL, 0, samples);
+		left = ask_segments(sql, tupdesc, rel, content, policy, NULL, 0, wide,
+							samples);
 
 		/* The segments whose share is well above what they sent, again */
 		initStringInfo(&targets);
@@ -848,10 +1143,12 @@ gather_sample(Relation rel, GpPolicy *policy, bool tree, int elevel,
 		}
 		if (nagain > 0)
 		{
-			sql = psprintf("SELECT * FROM gp_internal.%s(NULL::%s, CASE pg_catalog.gp_execution_segment()%s END)",
-						   function, qualified, targets.data);
+			sql = psprintf("SELECT * FROM gp_internal.%s(NULL::%s, CASE pg_catalog.gp_execution_segment()%s END%s)",
+						   function, qualified, targets.data, all);
 			ereport(elevel, (errmsg("Executing SQL: %s", sql)));
-			ask_segments(sql, tupdesc, relid, -1, policy, again, nagain, samples);
+			if (ask_segments(sql, tupdesc, rel, -1, policy, again, nagain, wide,
+							 samples))
+				left = true;
 		}
 	}
 	else
@@ -909,6 +1206,8 @@ gather_sample(Relation rel, GpPolicy *policy, bool tree, int elevel,
 
 	numrows = merge_segment_samples(samples, nsegs, rows, targrows,
 									totalrows, totaldeadrows);
+	if (left && !whole)
+		note_widths(rel, tree, wide, rows, numrows);
 	ereport(DEBUG2,
 			(errmsg_internal("\"%s\": %d rows in sample of a target of %d, %.0f estimated total rows, %d segments asked again",
 							 RelationGetRelationName(rel), numrows, targrows,
@@ -979,7 +1278,8 @@ distributed_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
 	int			numrows;
 
 	numrows = gather_sample(rel, GpScanDistributedPolicy(RelationGetRelid(rel)),
-							false, elevel, rows, targrows, totalrows, totaldeadrows);
+							false, false, elevel, rows, targrows, totalrows,
+							totaldeadrows);
 	after_own_sample(rel, fullscan, rows, numrows, *totalrows);
 	return numrows;
 }
@@ -1015,7 +1315,8 @@ member_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
 				   double *totalrows, double *totaldeadrows)
 {
 	return gather_sample(rel, GpScanDistributedPolicy(RelationGetRelid(rel)),
-						 false, elevel, rows, targrows, totalrows, totaldeadrows);
+						 false, true, elevel, rows, targrows, totalrows,
+						 totaldeadrows);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1077,7 +1378,7 @@ static int
 tree_sample_rows(Relation rel, int elevel, HeapTuple *rows, int targrows,
 				 double *totalrows, double *totaldeadrows)
 {
-	return gather_sample(rel, walk_policy, true, elevel, rows, targrows,
+	return gather_sample(rel, walk_policy, true, false, elevel, rows, targrows,
 						 totalrows, totaldeadrows);
 }
 

@@ -86,6 +86,13 @@ extern List *GpRootMergeableColumns(Relation root, List *va_cols, int elevel,
 extern double GpRootMerge(Relation root, List *attnums);
 extern void GpRootMergeLater(Oid root, List *attnums);
 
+/*
+ * A column's average width, written over PostgreSQL's once PostgreSQL has
+ * written the column's statistics: the table's own, or its tree's.
+ */
+extern void GpStatWidthLater(Oid relid, AttrNumber attnum, bool inherit,
+							 int32 stawidth);
+
 /* What is to be written over PostgreSQL's statistics, written now. */
 extern void GpPartMergeFinish(void);
 

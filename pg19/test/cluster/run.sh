@@ -1916,6 +1916,37 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 		*) notok "what ANALYZE asks the segments of a skewed table" "$out / $out2" ;;
 	esac
 
+	# A value over a kilobyte stays on its segment, in a column whose
+	# statistics read no such value: the row comes without it, and a row
+	# after it says its length.  Not an array's, whose analysis is its
+	# type's own; nor a column an index's expression reads.  The statistics
+	# are what they were with the values here: a quarter NULL, and the
+	# width of 500 values of 6 bytes and 1,000 of 3,000.
+	q 0 "CREATE TABLE swd (k int, small text, big text, arr int[]) DISTRIBUTED BY (k);
+	     INSERT INTO swd SELECT i, 'v' || i % 10,
+	            CASE i % 4 WHEN 0 THEN NULL WHEN 1 THEN 'short' ELSE repeat('w', 2996) END,
+	            array_fill(i, ARRAY[300]) FROM generate_series(1, 2000) i;
+	     CREATE TABLE swe (LIKE swd) DISTRIBUTED BY (k);
+	     INSERT INTO swe SELECT * FROM swd;
+	     CREATE INDEX swe_e ON swe (md5(big));" >/dev/null
+	wide=$(q 0 "SELECT count(*) FROM swd WHERE gp_segment_id = 0 AND length(big) > 1000;")
+	left="SELECT (count(*) FILTER (WHERE (sample).k IS NULL) - 1) || ':' ||
+	             count(*) FILTER (WHERE length((sample).big) > 1000) || ':' ||
+	             count(*) FILTER (WHERE (sample).arr IS NOT NULL)"
+	out=$(q 1 "$left FROM gp_internal.sample_rows(NULL::swd, 5000);")
+	out2=$(q 1 "$left FROM gp_internal.sample_rows(NULL::swd, 5000, true);")
+	out3=$(q 1 "$left FROM gp_internal.sample_rows(NULL::swe, 5000);")
+	total=$(q 1 "SELECT count(*) FROM swd;")
+	[ "$wide" -gt 300 ] && [ "$out|$out2|$out3" = "$wide:0:$total|0:$wide:$total|0:$wide:$total" ] \
+		&& ok "a segment's sample leaves out the values over a kilobyte that no statistics read, and says their lengths" \
+		|| notok "a segment's sample of a table with wide values" "$out / $out2 / $out3 (wide $wide of $total)"
+	out=$(q 0 "ANALYZE swd; ANALYZE swe;
+	           SELECT string_agg(tablename || '.' || attname || ':' || null_frac || ':' || avg_width, ' ' ORDER BY tablename, attname)
+	             FROM pg_stats WHERE tablename IN ('swd', 'swe', 'swe_e') AND attname IN ('big', 'arr', 'md5');")
+	[ "$out" = "swd.arr:0:1224 swd.big:0.25:2002 swe.arr:0:1224 swe.big:0.25:2002 swe_e.md5:0.25:36" ] \
+		&& ok "and the statistics are what they were with the values on the coordinator" \
+		|| notok "the statistics of a table with wide values" "$out"
+
 	# A tree's sample on a segment gives its members rows by their pages,
 	# and with a target under half the members, PostgreSQL's rounding gives
 	# every member none: a segment's target is its part of the coordinator's

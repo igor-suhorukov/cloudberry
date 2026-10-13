@@ -506,7 +506,11 @@ Distributed transactions (M3), in `gp_core`:
   every row sent and so weighs a segment that holds most of a table as
   light as the others; and a segment whose share is over 1.25 times what
   it sent is asked once more, for the share -- up to that, the sample is
-  cut to fit;
+  cut to fit.  A value over a kilobyte stays on its segment, as
+  Cloudberry's does, where the column's statistics are PostgreSQL's
+  standard ones, which count such a value and read nothing of it, and no
+  index expression or extended statistics object reads the column: the
+  column's width is written as it was with the values on the coordinator;
 - ANALYZE of a partitioned table as Cloudberry's takes it, on one node too:
   the root and the mid-levels as `gp.optimizer_analyze_root_partition` and
   `_midlevel_partition` say, ANALYZE ROOTPARTITION, the leaves before the

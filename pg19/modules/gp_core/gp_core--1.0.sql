@@ -43,13 +43,17 @@ GRANT USAGE ON SCHEMA gp TO PUBLIC;
 /*
  * A segment's sample of a table, for ANALYZE on the coordinator (O3).  The
  * first row is the segment's live and dead row counts; every other row is a
- * sampled row of the table's own type.  It checks that the caller may read or
- * ANALYZE the table, and is not STRICT because NULL::t is how it is told
- * which table.
+ * sampled row of the table's own type, or says of the row before it a value
+ * over a kilobyte that was not sent, in a column whose statistics read no
+ * such value -- the column's number and the value's length, in the two
+ * columns of the counts; with "whole" every value is sent (gp_analyze.c).
+ * It checks that the caller may read or ANALYZE the table, and is not STRICT
+ * because NULL::t is how it is told which table.
  */
 CREATE FUNCTION gp_internal.sample_rows(
 	rel anyelement,
 	targrows int,
+	whole bool DEFAULT false,
 	OUT totalrows float8,
 	OUT totaldeadrows float8,
 	OUT sample anyelement)
@@ -3561,6 +3565,7 @@ GRANT SELECT ON gp_toolkit.gp_workfile_mgr_used_diskspace TO public;
 CREATE FUNCTION gp_internal.sample_tree(
 	rel anyelement,
 	targrows int,
+	whole bool DEFAULT false,
 	OUT totalrows float8,
 	OUT totaldeadrows float8,
 	OUT sample anyelement)

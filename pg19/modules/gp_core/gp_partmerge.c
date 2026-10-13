@@ -591,10 +591,13 @@ GpLeafFullScan(Relation leaf, List *va_cols, int elevel)
 
 /*
  * A root's columns merged from its leaves' where PostgreSQL sampled the
- * root for others, or a leaf's number of distinct values a full scan
- * counted, each written over the row PostgreSQL writes: as the
- * transaction commits, or as the statement ends where it runs in the
- * caller's.  Forgotten with the subtransaction that asked for them.
+ * root for others, a leaf's number of distinct values a full scan counted,
+ * or a column's average width where the sample left its widest values on
+ * the segments (gp_analyze.c), each written over the row PostgreSQL
+ * writes: as the transaction commits, or as the statement ends where it
+ * runs in the caller's -- a width also before a root is merged from the
+ * rows that have it.  Forgotten with the subtransaction that asked for
+ * them.
  */
 typedef struct PendingWrite
 {
@@ -602,6 +605,9 @@ typedef struct PendingWrite
 	List	   *attnums;		/* a root's, to merge */
 	AttrNumber	attnum;			/* or a leaf's, */
 	float4		stadistinct;	/* and its number of distinct values */
+	bool		width;			/* or a column's, of the table or its tree, */
+	bool		inherit;
+	int32		stawidth;		/* and its average width */
 	SubTransactionId subid;
 } PendingWrite;
 
@@ -677,6 +683,73 @@ GpRootMergeLater(Oid root, List *attnums)
 	add_pending(&w);
 }
 
+/*
+ * A column's average width, to be written over PostgreSQL's: of the table's
+ * own statistics, or with "inherit" of its tree's.
+ */
+void
+GpStatWidthLater(Oid relid, AttrNumber attnum, bool inherit, int32 stawidth)
+{
+	PendingWrite w = {0};
+
+	w.relid = relid;
+	w.attnum = attnum;
+	w.width = true;
+	w.inherit = inherit;
+	w.stawidth = stawidth;
+	add_pending(&w);
+}
+
+/*
+ * ... written, over the row this transaction's ANALYZE wrote of the column:
+ * no other, which is of another sample, or of none where the statement
+ * left the column out.
+ */
+static void
+write_width(const PendingWrite *w)
+{
+	Relation	sd = table_open(StatisticRelationId, RowExclusiveLock);
+	HeapTuple	oldtup = SearchSysCache3(STATRELATTINH, ObjectIdGetDatum(w->relid),
+										 Int16GetDatum(w->attnum),
+										 BoolGetDatum(w->inherit));
+
+	if (HeapTupleIsValid(oldtup))
+	{
+		if (TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetXmin(oldtup->t_data)))
+		{
+			HeapTuple	tup = heap_copytuple(oldtup);
+
+			((Form_pg_statistic) GETSTRUCT(tup))->stawidth = w->stawidth;
+			CatalogTupleUpdate(sd, &tup->t_self, tup);
+		}
+		ReleaseSysCache(oldtup);
+	}
+	table_close(sd, RowExclusiveLock);
+}
+
+/*
+ * The widths pending, written now: before a root's statistics are merged
+ * from its leaves', which in a transaction block have not been yet.
+ */
+static void
+write_pending_widths(void)
+{
+	bool		any = false;
+
+	foreach_ptr(PendingWrite, w, pending)
+	{
+		if (!w->width)
+			continue;
+		pending = foreach_delete_current(pending, w);
+		CommandCounterIncrement();
+		write_width(w);
+		any = true;
+	}
+	/* for the merge that reads them */
+	if (any)
+		CommandCounterIncrement();
+}
+
 static void merge_and_write(Relation root, List *attnums);
 
 /* A leaf's number of distinct values, over PostgreSQL's. */
@@ -720,7 +793,9 @@ GpPartMergeFinish(void)
 
 		pending = list_delete_first(pending);
 		CommandCounterIncrement();
-		if (w->attnums != NIL)
+		if (w->width)
+			write_width(w);
+		else if (w->attnums != NIL)
 		{
 			Relation	root = try_relation_open(w->relid, ShareUpdateExclusiveLock);
 
@@ -1694,6 +1769,7 @@ merge_and_write(Relation root, List *attnums)
 	MemoryContext old = MemoryContextSwitchTo(cxt);
 	TupleDesc	tupdesc = RelationGetDescr(root);
 
+	write_pending_widths();
 	foreach_int(attnum, attnums)
 	{
 		VacAttrStats *stats = palloc0_object(VacAttrStats);
