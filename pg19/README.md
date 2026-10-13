@@ -483,6 +483,14 @@ Distributed transactions (M3), in `gp_core`:
   Cloudberry's segments write them, which the segment's VACUUM keeps where it
   scans too little to count, and an index's pages after ANALYZE are its
   files' on the segments;
+- ANALYZE's sample of a distributed table: each segment is asked for the
+  target's rows over the number of segments, as Cloudberry asks, so that
+  the rows sent are one target; the coordinator keeps of each segment's
+  sample its share by the rows the segment has, where Cloudberry keeps
+  every row sent and so weighs a segment that holds most of a table as
+  light as the others; and a segment whose share is over 1.25 times what
+  it sent is asked once more, for the share -- up to that, the sample is
+  cut to fit;
 - ANALYZE of a partitioned table as Cloudberry's takes it, on one node too:
   the root and the mid-levels as `gp.optimizer_analyze_root_partition` and
   `_midlevel_partition` say, ANALYZE ROOTPARTITION, the leaves before the

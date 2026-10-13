@@ -63,18 +63,14 @@ ao_index_build_progress
   one relation's file has not: "could not stat file".
 
 uao/fast_analyze_row and _column
-  Two things.  attstattarget of a column whose statistics target was never
-  set is NULL in PostgreSQL 19, where Cloudberry's is -1.  And the first
-  scenario's count of the sample rows each segment returned, of 10,500 it
-  has: 10,500, where Cloudberry's is 10,000.  Cloudberry's coordinator
-  asks each segment for a third of the 30,000 rows ANALYZE wants and keeps
-  all it gets; the port's asks each for all 30,000 and keeps of each
-  segment's sample a share in proportion to the rows the segment has
-  (gp_analyze.c, merge_segment_samples()), so that a table most of whose
-  rows are on one segment is sampled as a whole.  A segment with fewer
-  rows than the target returns them all.  The other scenarios -- fewer
+  attstattarget of a column whose statistics target was never set is NULL
+  in PostgreSQL 19, where Cloudberry's is -1.  The counts of the sample
+  rows each segment returned are Cloudberry's: 10,000 of the 10,500 a
+  segment has in the first scenario, the coordinator asking each segment
+  for a third of the 30,000 rows ANALYZE wants, as Cloudberry's does
+  (gp_analyze.c, gather_sample()); and 10, 0 and 0 in the others -- fewer
   rows than the target, every row aborted, every row deleted, with and
-  without a block directory -- count as Cloudberry's do: 10, 0 and 0.
+  without a block directory.
 
 bitmap_index_ao_sparse, uao/snapshot_index_corruption_row and _column
   EXPLAIN's plans and nothing else.  The tests turn ORCA off, so

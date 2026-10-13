@@ -1770,6 +1770,58 @@ a\b|\N' ] && [ "$(cat "$ROOT/ce_prog.txt" 2>&1)" = "to a program" ] \
 	[ "$out" = "300" ] && ok "a replicated table's rows are counted once, not once a segment" \
 		|| notok "reltuples of a replicated table" "$out"
 
+	# What a segment is asked for: the target over the number of segments,
+	# as Cloudberry asks, so the rows sent are one target, where they were
+	# one a segment.  Cloudberry keeps every row sent, and so weighs a
+	# segment with nine rows of ten as light as the other: a value found
+	# there alone would come out at 0.57 of the rows here, where it is 0.9.
+	# The port keeps of each segment's sample its share by rows, and asks a
+	# segment whose share is well above what it sent once more, for the
+	# share.  The statistics target is 10: a sample of 3,000 rows, 1,500 a
+	# segment.
+	q 0 "CREATE TABLE sev (k int, v int) DISTRIBUTED BY (k);
+	     INSERT INTO sev SELECT i, i % 7 FROM generate_series(1, 9000) i;
+	     CREATE TABLE ssk (k int, v int) DISTRIBUTED BY (k);
+	     INSERT INTO ssk SELECT CASE WHEN i % 10 < 9 THEN 0 ELSE i END, CASE WHEN i % 10 < 9 THEN -1 ELSE i % 5 END
+	       FROM generate_series(1, 20000) i;" >/dev/null
+	out=$(q 0 "SET default_statistics_target = 10; ANALYZE VERBOSE sev;" | grep "Executing SQL" | tr '\n' '|')
+	out2=$(q 0 "SELECT reltuples FROM pg_class WHERE relname = 'sev';")
+	case "$out|$out2" in
+		"INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.sev, 1500)||9000")
+			ok "ANALYZE asks each segment for the target over the number of segments, once" ;;
+		*) notok "what ANALYZE asks the segments of an even table" "$out / $out2" ;;
+	esac
+	big=$(q 0 "SELECT gp_segment_id FROM ssk WHERE k = 0 LIMIT 1;")
+	out=$(q 0 "SET default_statistics_target = 10; ANALYZE VERBOSE ssk;" | grep "Executing SQL" | tr '\n' '|')
+	out2=$(q 0 "SELECT reltuples, (most_common_vals::text::int[])[1], (most_common_freqs)[1] BETWEEN 0.87 AND 0.93
+	              FROM pg_class, pg_stats WHERE relname = 'ssk' AND tablename = 'ssk' AND attname = 'v';")
+	case "$out" in
+		"INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.ssk, 1500)|INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.ssk, CASE pg_catalog.gp_execution_segment() WHEN $big THEN 28"[0-9][0-9]" END)|")
+			[ "$out2" = "20000|-1|t" ] \
+				&& ok "a segment with most of the rows is asked again for its share, and its values weigh what they are" \
+				|| notok "the statistics of a table most of whose rows are on one segment" "$out2" ;;
+		*) notok "what ANALYZE asks the segments of a skewed table" "$out / $out2" ;;
+	esac
+
+	# A tree's sample on a segment gives its members rows by their pages,
+	# and with a target under half the members, PostgreSQL's rounding gives
+	# every member none: a segment's target is its part of the coordinator's
+	# now, so that is a wide tree on many segments.  The members' shares are
+	# cut out of the target one after another, and those that get no row
+	# are counted by their pages.
+	{
+		echo "CREATE TABLE stp (k int, v int) DISTRIBUTED BY (k);"
+		for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+			echo "CREATE TABLE stc$i () INHERITS (stp) DISTRIBUTED BY (k);"
+			echo "INSERT INTO stc$i SELECT g, $i FROM generate_series(1, 400) g;"
+		done
+	} | qf 0 >/dev/null 2>&1
+	own=$(q 1 "SELECT count(*) FROM stp;")
+	out=$(q 1 "SELECT count(sample) || ' ' || count(DISTINCT (sample).v) || ' ' || (max(totalrows) BETWEEN $own * 0.5 AND $own * 1.5)
+	             FROM gp_internal.sample_tree(NULL::stp, 4);")
+	[ "$out" = "4 4 true" ] && ok "a tree's sample of fewer rows than half its members has that many rows, and counts every member" \
+		|| notok "a tree's sample with a target under half its members" "$out, of $own rows"
+
 	# VACUUM ANALYZE: the coordinator runs the statement before it dispatches
 	# it whole, and its ANALYZE samples the segments all the same -- once
 	# sampled the coordinator's empty copy, and left no statistics at all.

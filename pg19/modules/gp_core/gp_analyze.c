@@ -32,12 +32,17 @@
  * Each segment samples its own rows, with the same block sampler and
  * reservoir PostgreSQL's acquire_sample_rows() uses, through
  * gp_internal.sample_rows(), and writes what it counted into its own
- * pg_class, as Cloudberry's segments do; the coordinator takes from each
+ * pg_class, as Cloudberry's segments do.  A segment is asked for the target
+ * over the number of segments, as Cloudberry asks, so that the rows sent are
+ * the target and not as many times it as there are segments.  Cloudberry
+ * keeps every row sent, which weighs a segment with more rows than the
+ * others as light as the rest; the coordinator here takes from each
  * segment's sample in proportion to how many rows the segment has, chosen at
- * random, so that the whole is a sample of the table.  That is Cloudberry's
- * gp_acquire_sample_rows() in shape.  In a database where gp_core's functions
- * are not installed, the coordinator samples the gathered rows itself -- the
- * same answer, at the cost of reading every row.
+ * random, so that the whole is a sample of the table -- and a segment whose
+ * share is well above what it sent is asked once more, for its share
+ * (gather_sample()).  In a database where gp_core's functions are not
+ * installed, the coordinator samples the gathered rows itself -- the same
+ * answer, at the cost of reading every row.
  *
  * An inheritance tree -- a partitioned table's leaves -- is sampled as one,
  * each segment sampling its members, as Cloudberry's is, rather than member
@@ -470,6 +475,9 @@ gp_sample_tree(PG_FUNCTION_ARGS)
 	AnalyzeSampleRowsFunc *funcs;
 	double	   *pages;
 	double		totalpages = 0;
+	double		sampledpages = 0;
+	double		before = 0;		/* the pages of the members before this one */
+	double		offset;
 	HeapTuple  *rows;
 	int			numrows = 0;
 	double		totalrows = 0;
@@ -508,6 +516,7 @@ gp_sample_tree(PG_FUNCTION_ARGS)
 
 	rows = (HeapTuple *) palloc(targrows * sizeof(HeapTuple));
 	pgstat_progress_update_param(PROGRESS_ANALYZE_CHILD_TABLES_TOTAL, n);
+	offset = pg_prng_double(&pg_global_prng_state);
 	for (int i = 0; i < n; i++)
 	{
 		int			childtargrows;
@@ -523,8 +532,21 @@ gp_sample_tree(PG_FUNCTION_ARGS)
 			pgstat_progress_update_param(PROGRESS_ANALYZE_CHILD_TABLES_DONE, i + 1);
 			continue;
 		}
-		childtargrows = Min((int) rint(targrows * pages[i] / totalpages),
-							targrows - numrows);
+
+		/*
+		 * A member's share of the target is its share of the pages, as
+		 * acquire_inherited_sample_rows() gives it, but not each share
+		 * rounded by itself: the target here is a segment's part of the
+		 * coordinator's, and where it is less than half the members, every
+		 * share rounds to no row and the tree has no sample.  The shares are
+		 * cut out of the target one after another instead, from an offset
+		 * chosen at random, so that they make the target exactly and a member
+		 * with less than a row's share gets a row as often as its share says.
+		 */
+		childtargrows = (int) (floor(targrows * (before + pages[i]) / totalpages + offset) -
+							   floor(targrows * before / totalpages + offset));
+		before += pages[i];
+		childtargrows = Min(childtargrows, targrows - numrows);
 		if (childtargrows <= 0)
 		{
 			pgstat_progress_update_param(PROGRESS_ANALYZE_CHILD_TABLES_DONE, i + 1);
@@ -550,7 +572,19 @@ gp_sample_tree(PG_FUNCTION_ARGS)
 		numrows += childrows;
 		totalrows += trows;
 		totaldeadrows += tdrows;
+		sampledpages += pages[i];
 		pgstat_progress_update_param(PROGRESS_ANALYZE_CHILD_TABLES_DONE, i + 1);
+	}
+
+	/*
+	 * The members that got no row were not counted either: their pages are
+	 * taken to hold rows as densely as the pages of those that were, as
+	 * vac_estimate_reltuples() takes the pages a VACUUM did not scan.
+	 */
+	if (sampledpages > 0 && sampledpages < totalpages)
+	{
+		totalrows = floor(totalrows * totalpages / sampledpages + 0.5);
+		totaldeadrows = floor(totaldeadrows * totalpages / sampledpages + 0.5);
 	}
 
 	put_sample(rsinfo, RelationGetDescr(parent), rows, numrows, totalrows,
@@ -571,8 +605,16 @@ typedef struct SegmentSample
 {
 	double		totalrows;
 	double		totaldeadrows;
+	int			asked;			/* the rows it was asked for */
 	List	   *rows;			/* of HeapTuple */
 } SegmentSample;
+
+/*
+ * How many times the rows a segment sent its share of the sample may be
+ * before the segment is asked again.  Up to it the sample is cut to what the
+ * segment sent, and so is no smaller than the target over this.
+ */
+#define SAMPLE_SHARE_TOLERANCE	1.25
 
 static HeapTuple
 tuple_from_composite(Datum value, Oid relid)
@@ -603,7 +645,11 @@ have_sample_function(const char *name)
 /*
  * The coordinator's sample: each segment's own, merged.  A segment
  * contributes in proportion to how many rows it has, the rows it contributes
- * chosen at random from its sample and kept in its order.
+ * chosen at random from its sample and kept in its order.  Where a segment
+ * sent fewer rows than its share of the target, every segment's share is
+ * cut by as much: a row is as likely to be in the sample on one segment as
+ * on another, which is what PostgreSQL's estimators take a sample to be.
+ * What is not chosen is freed.
  */
 static int
 merge_segment_samples(SegmentSample *samples, int nsegs, HeapTuple *rows,
@@ -611,6 +657,7 @@ merge_segment_samples(SegmentSample *samples, int nsegs, HeapTuple *rows,
 {
 	double		total = 0;
 	double		dead = 0;
+	double		fraction;
 	int			numrows = 0;
 
 	for (int i = 0; i < nsegs; i++)
@@ -623,16 +670,26 @@ merge_segment_samples(SegmentSample *samples, int nsegs, HeapTuple *rows,
 	if (total <= 0)
 		return 0;
 
-	for (int i = 0; i < nsegs && numrows < targrows; i++)
+	/* the part of its rows every segment can give */
+	fraction = Min(1.0, targrows / total);
+	for (int i = 0; i < nsegs; i++)
 	{
 		int			have = list_length(samples[i].rows);
-		int			take = (int) floor(targrows * samples[i].totalrows / total + 0.5);
+
+		if (have > 0 && have < samples[i].totalrows * fraction)
+			fraction = have / samples[i].totalrows;
+	}
+
+	for (int i = 0; i < nsegs; i++)
+	{
+		int			have = list_length(samples[i].rows);
+		int			take = (int) floor(samples[i].totalrows * fraction + 0.5);
 		HeapTuple  *from;
 		bool	   *chosen;
 
 		take = Min(take, have);
 		take = Min(take, targrows - numrows);
-		if (take <= 0)
+		if (have <= 0)
 			continue;
 
 		/* Which of the segment's rows: take at random, keep their order. */
@@ -649,17 +706,83 @@ merge_segment_samples(SegmentSample *samples, int nsegs, HeapTuple *rows,
 			chosen[pick] = true;
 		}
 		for (int k = 0; k < have; k++)
+		{
 			if (chosen[k])
 				rows[numrows++] = from[k];
+			else
+				heap_freetuple(from[k]);
+		}
+		pfree(from);
+		pfree(chosen);
+		list_free(samples[i].rows);
+		samples[i].rows = NIL;
 	}
 
 	return numrows;
 }
 
 /*
+ * One round of asking: the query sent to the table's segments, or to those
+ * listed, and what each answers taken in place of what it sent before -- a
+ * segment's second sample is drawn apart from its first, so the two are not
+ * added.
+ */
+static void
+ask_segments(const char *sql, TupleDesc tupdesc, Oid relid, int content,
+			 const GpPolicy *policy, const int *again, int nagain,
+			 SegmentSample *samples)
+{
+	TupleTableSlot *slot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
+	GpGatherState *gather;
+	int			from;
+
+	for (int i = 0; i < nagain; i++)
+	{
+		list_free_deep(samples[again[i]].rows);
+		samples[again[i]].rows = NIL;
+	}
+
+	gather = again != NULL
+		? GpGatherStartOnContents(sql, tupdesc, again, nagain)
+		: start_on_table(sql, tupdesc, content, policy);
+	while (GpGatherNext(gather, slot, &from))
+	{
+		SegmentSample *s = &samples[from];
+
+		slot_getallattrs(slot);
+		if (!slot->tts_isnull[0])
+		{
+			s->totalrows = DatumGetFloat8(slot->tts_values[0]);
+			s->totaldeadrows = DatumGetFloat8(slot->tts_values[1]);
+		}
+		else if (!slot->tts_isnull[2])
+			s->rows = lappend(s->rows, tuple_from_composite(slot->tts_values[2], relid));
+	}
+	GpGatherEnd(gather);
+	ExecDropSingleTupleTableSlot(slot);
+}
+
+/*
  * A distributed table's sample, or with "tree" its inheritance tree's, as
  * one sample of the table's rows: each segment's own, merged.  Cloudberry's
  * acquire_sample_rows_dispatcher(), which says at elevel what it sends.
+ *
+ * Each segment is asked for the target over the number of segments, which
+ * is what the merge takes of it where the segments hold as many rows each.
+ * Where they do not, a segment with more than the others has a share above
+ * what it sent.  Up to SAMPLE_SHARE_TOLERANCE times that, the merge cuts
+ * the sample to fit; past it the segment is asked again, for its share, and
+ * that sample is the one merged.  So a table spread evenly costs the rows of
+ * one target and one round, where a target a segment was asked before; a
+ * table that is not costs a second round, of the segments that hold most of
+ * it; and neither is weighed by segment, as Cloudberry's sample is, whose
+ * source says so (analyze.c, "the sample will biased, too").
+ *
+ * A segment that sent fewer rows than it was asked for and still has more
+ * -- the pages it sampled were sparse, or a tree's members shared the
+ * target by their pages and not their rows -- is asked for as many times
+ * its share as it fell short.  No segment is asked for more than the
+ * target, which is what each was asked for before.
  */
 static int
 gather_sample(Relation rel, GpPolicy *policy, bool tree, int elevel,
@@ -672,17 +795,22 @@ gather_sample(Relation rel, GpPolicy *policy, bool tree, int elevel,
 	char	   *qualified = GpDispatchRelationName(RelationGetRelid(rel));
 	int			nsegs;
 	SegmentSample *samples;
-	TupleTableSlot *slot;
-	GpGatherState *gather;
-	int			from;
 	char	   *sql;
+	int			nagain = 0;
+	int			numrows;
 
 	GpClusterSegments(&nsegs);
 	samples = palloc0_array(SegmentSample, nsegs);
 
 	if (have_sample_function(tree ? "sample_tree" : "sample_rows"))
 	{
+		const char *function = tree ? "sample_tree" : "sample_rows";
 		TupleDesc	tupdesc = CreateTemplateTupleDesc(3);
+		int			nasked = replicated ? 1 : Max(policy->numsegments, 1);
+		int			ask = Max((targrows + nasked - 1) / nasked, 1);
+		int		   *again = palloc_array(int, nsegs);
+		double		total = 0;
+		StringInfoData targets;
 
 		TupleDescInitEntry(tupdesc, 1, "totalrows", FLOAT8OID, -1, 0);
 		TupleDescInitEntry(tupdesc, 2, "totaldeadrows", FLOAT8OID, -1, 0);
@@ -690,25 +818,41 @@ gather_sample(Relation rel, GpPolicy *policy, bool tree, int elevel,
 		TupleDescFinalize(tupdesc);
 
 		sql = psprintf("SELECT * FROM gp_internal.%s(NULL::%s, %d)",
-					   tree ? "sample_tree" : "sample_rows", qualified, targrows);
+					   function, qualified, ask);
 		ereport(elevel, (errmsg("Executing SQL: %s", sql)));
-		slot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
-		gather = start_on_table(sql, tupdesc, content, policy);
-		while (GpGatherNext(gather, slot, &from))
-		{
-			SegmentSample *s = &samples[from];
+		for (int i = 0; i < nsegs; i++)
+			samples[i].asked = ask;
+		ask_segments(sql, tupdesc, relid, content, policy, NULL, 0, samples);
 
-			slot_getallattrs(slot);
-			if (!slot->tts_isnull[0])
-			{
-				s->totalrows = DatumGetFloat8(slot->tts_values[0]);
-				s->totaldeadrows = DatumGetFloat8(slot->tts_values[1]);
-			}
-			else if (!slot->tts_isnull[2])
-				s->rows = lappend(s->rows, tuple_from_composite(slot->tts_values[2], relid));
+		/* The segments whose share is well above what they sent, again */
+		initStringInfo(&targets);
+		for (int i = 0; i < nsegs; i++)
+			total += samples[i].totalrows;
+		for (int i = 0; i < nsegs && total > 0; i++)
+		{
+			SegmentSample *s = &samples[i];
+			int			have = list_length(s->rows);
+			double		share = s->totalrows * Min(1.0, targrows / total);
+			double		target = share;
+
+			if (share <= have * SAMPLE_SHARE_TOLERANCE)
+				continue;
+			if (have < s->asked)
+				target = share * s->asked / Max(have, 1);
+			target = Min(ceil(target), targrows);
+			if (target <= s->asked)
+				continue;
+			s->asked = (int) target;
+			again[nagain++] = i;
+			appendStringInfo(&targets, " WHEN %d THEN %d", i, s->asked);
 		}
-		GpGatherEnd(gather);
-		ExecDropSingleTupleTableSlot(slot);
+		if (nagain > 0)
+		{
+			sql = psprintf("SELECT * FROM gp_internal.%s(NULL::%s, CASE pg_catalog.gp_execution_segment()%s END)",
+						   function, qualified, targets.data);
+			ereport(elevel, (errmsg("Executing SQL: %s", sql)));
+			ask_segments(sql, tupdesc, relid, -1, policy, again, nagain, samples);
+		}
 	}
 	else
 	{
@@ -719,6 +863,8 @@ gather_sample(Relation rel, GpPolicy *policy, bool tree, int elevel,
 		ReservoirStateData rstate;
 		double		rowstoskip = -1;
 		double		seen = 0;
+		TupleTableSlot *slot;
+		GpGatherState *gather;
 
 		sql = psprintf("SELECT * FROM %s%s", tree ? "" : "ONLY ", qualified);
 		ereport(elevel, (errmsg("Executing SQL: %s", sql)));
@@ -761,8 +907,13 @@ gather_sample(Relation rel, GpPolicy *policy, bool tree, int elevel,
 		nsegs = 1;
 	}
 
-	return merge_segment_samples(samples, nsegs, rows, targrows,
-								 totalrows, totaldeadrows);
+	numrows = merge_segment_samples(samples, nsegs, rows, targrows,
+									totalrows, totaldeadrows);
+	ereport(DEBUG2,
+			(errmsg_internal("\"%s\": %d rows in sample of a target of %d, %.0f estimated total rows, %d segments asked again",
+							 RelationGetRelationName(rel), numrows, targrows,
+							 *totalrows, nagain)));
+	return numrows;
 }
 
 /*

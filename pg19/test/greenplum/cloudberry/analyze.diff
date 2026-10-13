@@ -64,16 +64,16 @@
 + t
 @@
 -INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(XXX, XXX, 'f')
-+INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.p1, 30000)
++INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.p1, 10000)
 @@
 -INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(XXX, XXX, 'f')
-+INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.p2, 30000)
++INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.p2, 10000)
 @@
 -INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(XXX, XXX, 'f')
-+INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.p2, 30000)
++INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.p2, 10000)
 @@
 -INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(XXX, XXX, 't')
-+INFO:  Executing SQL: SELECT * FROM gp_internal.sample_tree(NULL::public.part2, 30000)
++INFO:  Executing SQL: SELECT * FROM gp_internal.sample_tree(NULL::public.part2, 10000)
 @@
 - public     | part2     | a       | t         |         0 |         4 |         -1 |                  |                   | {0,1,2,3,4,5,6,7,8,9} |  0.33333334 |                   |                        | 
 + public     | part2     | a       | t         |         0 |         4 |         -1 |                  |                   | {0,1,2,3,4,5,6,7,8,9} |  0.36969697 |                   |                        | 

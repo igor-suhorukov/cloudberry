@@ -7,7 +7,7 @@
 + public     | foo_1_prt_2 | c       | f         |         0 |    400004 |         -1 |                  |                   |                  |             |                   |                        | 
 @@
 -INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows()
-+INFO:  Executing SQL: SELECT * FROM gp_internal.sample_tree(NULL::public.foo, 1200)
++INFO:  Executing SQL: SELECT * FROM gp_internal.sample_tree(NULL::public.foo, 400)
 @@
 - incr_analyze_test_1_prt_1 |        1 |         1
 - incr_analyze_test_1_prt_2 |        2 |      1000
@@ -24,37 +24,37 @@
 +         1 |        2 |        3 |        0 |        0 |        0 | {1,3,5,7,10} |            |            |            | 
 @@
 -INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows()
-+INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.foo_1_prt_2, 1200)
++INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.foo_1_prt_2, 400)
 @@
 -INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows()
-+INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.foo_1_prt_1, 1200)
++INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.foo_1_prt_1, 400)
 @@
 -INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows()
-+INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.foo_1_prt_2, 1200)
++INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.foo_1_prt_2, 400)
 @@
 -INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows()
-+INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.foo_1_prt_1, 1200)
++INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.foo_1_prt_1, 400)
 @@
 -INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows()
-+INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.foo_1_prt_2, 1200)
++INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.foo_1_prt_2, 400)
 @@
 -INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows()
-+INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.foo_1_prt_1, 1200)
++INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.foo_1_prt_1, 400)
 @@
 -INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows()
-+INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.foo_1_prt_1, 1200)
++INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.foo_1_prt_1, 400)
 @@
 -INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows()
-+INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.foo_1_prt_2, 1200)
++INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.foo_1_prt_2, 400)
 @@
 -INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows()
-+INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.foo_1_prt_20210301, 1200)
++INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.foo_1_prt_20210301, 400)
 @@
 -INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows()
-+INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.foo_1_prt_20210201, 1200)
++INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.foo_1_prt_20210201, 400)
 @@
 -INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows()
-+INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.foo_1_prt_20210101, 1200)
++INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.foo_1_prt_20210101, 400)
 @@
 -INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows()
-+INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.foo_1_prt_20210201, 1200)
++INFO:  Executing SQL: SELECT * FROM gp_internal.sample_rows(NULL::public.foo_1_prt_20210201, 400)
