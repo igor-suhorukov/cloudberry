@@ -1039,11 +1039,14 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	# here -- the order is what keeps two statements with the same keys from
 	# a deadlock no segment sees -- until the global deadlock detector is on
 	# (section 14).  Shown by holding the first segment's COPY at the table's
-	# lock: the second segment has been sent its COPY by then, or has not.
+	# lock: the second segment has been sent its COPY by then, or has not --
+	# nor where the first segment's rows go as the COPY reads them, its data
+	# past the piece it decides on (below).
 	q 0 "CREATE TABLE rt_o (k int, v int CHECK (v > 0)) DISTRIBUTED BY (k);
-	     CREATE TABLE rt_k (k int PRIMARY KEY, v int CHECK (v > 0)) DISTRIBUTED BY (k);" >/dev/null
-	route_seen() {				# route_seen <table>: is the second segment sent its COPY while the first waits?  By COPY FROM, which is routed whoever plans.
-		local t=$1 w= seen= holder ins
+	     CREATE TABLE rt_k (k int PRIMARY KEY, v int CHECK (v > 0)) DISTRIBUTED BY (k);
+	     CREATE TABLE rt_kl (k int PRIMARY KEY, v int CHECK (v > 0)) DISTRIBUTED BY (k);" >/dev/null
+	route_seen() {				# route_seen <table> [<rows>]: is the second segment sent its COPY while the first waits?  By COPY FROM, which is routed whoever plans.
+		local t=$1 n=${2:-200} w= seen= holder ins
 		(printf '%s\n' "BEGIN;" "LOCK TABLE $t IN SHARE MODE;" "SELECT pg_sleep(60);" | qf 1 >/dev/null 2>&1) &
 		holder=$!
 		for _ in $(seq 100); do
@@ -1051,7 +1054,7 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 			[ "$w" = 1 ] && break
 			sleep 0.1
 		done
-		{ echo "COPY $t FROM STDIN;"; seq 1 200 | sed 's/.*/&\t&/'; echo '\.'; } | qf 0 >/dev/null 2>&1 &
+		{ echo "COPY $t FROM STDIN;"; seq 1 "$n" | sed 's/.*/&\t&/'; echo '\.'; } | qf 0 >/dev/null 2>&1 &
 		ins=$!
 		for _ in $(seq 100); do
 			w=$(q 1 "SELECT count(*) FROM pg_stat_activity WHERE query LIKE 'COPY public.$t %' AND wait_event_type = 'Lock';")
@@ -1065,10 +1068,11 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	}
 	out=$(route_seen rt_o)
 	out2=$(route_seen rt_k)
-	out3=$(q 0 "SELECT (SELECT count(*) FROM rt_o) || ' ' || (SELECT count(*) FROM rt_k);")
-	[ "$out|$out2|$out3" = "11|10|200 200" ] \
+	out4=$(route_seen rt_kl 20000)
+	out3=$(q 0 "SELECT (SELECT count(*) FROM rt_o) || ' ' || (SELECT count(*) FROM rt_k) || ' ' || (SELECT count(*) FROM rt_kl);")
+	[ "$out|$out2|$out4|$out3" = "11|10|10|200 200 20000" ] \
 		&& ok "routed rows go to every segment at once, and one segment after another into a table with a unique index" \
-		|| notok "the route of a COPY's rows (first segment waits, second sent: at once / in order)" "$out / $out2 / $out3"
+		|| notok "the route of a COPY's rows (first segment waits, second sent: at once / in order / in order, the first's as read)" "$out / $out2 / $out4 / $out3"
 
 	# Rows that fail on both segments: the error is the first segment's in
 	# their order and names that one alone, as it does where the rows go in
@@ -1150,13 +1154,15 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	# the segments' connections meanwhile -- and nothing of the data is kept
 	# here but a piece a segment, where every row of it was held, in work_mem
 	# and then in temporary files, until the last was read.  Where the rows
-	# may go to every segment at once, that is; a table with a primary key,
-	# whose rows go one segment after another, has them held as they were.
-	# Shown by a COPY from a pipe that has been written every row and is not
-	# closed: the segments have rows of it by then, or have not been sent
-	# their COPY.
-	copy_pipe() {				# copy_pipe <table> <k of a row to fail, or 0>: "<rows the segments have, the pipe open>|<the COPY ended, the pipe open>|<what it said>"
-		local t=$1 bad=$2 cp seen=0 ended=0 total got s0 s1
+	# may go to every segment at once, that is; into a table with a primary
+	# key, whose rows go one segment after another, the first segment's go
+	# as they are read, and the others' are held, to go after it -- a
+	# replicated table's too, every row of which is every segment's.  Shown
+	# by a COPY from a pipe that has been written every row and is not
+	# closed: each segment has rows of it by then, or has not been sent its
+	# COPY.
+	copy_pipe() {				# copy_pipe <table> <k of a row to fail, or 0>: "<rows segment 0 has, the pipe open>,<segment 1's>|<the COPY ended, the pipe open>|<what it said>"
+		local t=$1 bad=$2 cp wr= seen=none,none ended=0 total got s0 s1
 		rm -f "$ROOT/rt.fifo"; mkfifo "$ROOT/rt.fifo"
 		# the COPY first: a process begun with the pipe open here would hold it open
 		q 0 "COPY $t (k, v) FROM '$ROOT/rt.fifo';" >"$ROOT/rt.copy" 2>&1 &
@@ -1164,13 +1170,16 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 		exec 7<>"$ROOT/rt.fifo"
 		seq 1 40000 | awk -v bad="$bad" '{ print $1 "\t" ($1 == bad ? -1 : $1) }' >"$ROOT/rt.data"
 		total=$(wc -c <"$ROOT/rt.data")
-		# a row that is to fail: the rest of the data comes after its segment has said so
+		# a row that is to fail: the rest of the data comes after its segment
+		# has said so, written beside the looks below -- a COPY that ends at
+		# the failure reads no more of it, and the writer ends as the pipe
+		# closes, where it waited out its timeout
 		if [ "$bad" = 0 ]; then
 			timeout 60 cat "$ROOT/rt.data" >&7
 		else
-			head -n 20000 "$ROOT/rt.data" | timeout 60 cat >&7
-			sleep 1
-			tail -n 20000 "$ROOT/rt.data" | timeout 60 cat >&7
+			{ head -n 20000 "$ROOT/rt.data"; sleep 1; tail -n 20000 "$ROOT/rt.data"; } |
+				timeout 60 cat >&7 &
+			wr=$!
 		fi
 		# until the coordinator has read all but what its last read waits for
 		for _ in $(seq 200); do
@@ -1185,39 +1194,49 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 			kill -0 "$cp" 2>/dev/null || { ended=1; break; }
 			s0=$(q 1 "SELECT coalesce(sum(tuples_processed), 0) FROM pg_stat_progress_copy;")
 			s1=$(q 2 "SELECT coalesce(sum(tuples_processed), 0) FROM pg_stat_progress_copy;")
-			isnum "$s0" && isnum "$s1" && seen=$((s0 + s1))
-			[ "$seen" -gt 0 ] && [ "$bad" = 0 ] && break
+			isnum "$s0" && isnum "$s1" &&
+				seen="$([ "$s0" -gt 0 ] && echo rows || echo none),$([ "$s1" -gt 0 ] && echo rows || echo none)"
+			[ "$seen" = rows,rows ] && [ "$bad" = 0 ] && break
 			sleep 0.2
 		done
 		exec 7>&-
 		wait "$cp"
-		echo "$([ "$seen" -gt 0 ] && echo rows || echo none)|$ended|$(tr '\n' ' ' <"$ROOT/rt.copy")"
+		[ -n "$wr" ] && wait "$wr" 2>/dev/null
+		echo "$seen|$ended|$(tr '\n' ' ' <"$ROOT/rt.copy")"
 	}
 	q 0 "CREATE TABLE rt_ref (k int, v int) DISTRIBUTED BY (k);
 	     INSERT INTO rt_ref SELECT i, i FROM generate_series(1, 50) i;
 	     CREATE TABLE rt_d (k int, v int CHECK (v > 0)) DISTRIBUTED BY (k);
-	     CREATE TABLE rt_dk (k int PRIMARY KEY, v int CHECK (v > 0)) DISTRIBUTED BY (k);" >/dev/null
+	     CREATE TABLE rt_dk (k int PRIMARY KEY, v int CHECK (v > 0)) DISTRIBUTED BY (k);
+	     CREATE TABLE rt_drk (k int PRIMARY KEY, v int CHECK (v > 0)) DISTRIBUTED REPLICATED;" >/dev/null
 	out=$(copy_pipe rt_d 0)
 	out2=$(copy_pipe rt_dk 0)
+	out4=$(copy_pipe rt_drk 0)
 	out3=$(q 0 "SELECT (SELECT count(*) || ',' || sum(v) FROM rt_d) || ' ' || (SELECT count(*) || ',' || sum(v) FROM rt_dk);")
-	[ "$out|$out2|$out3" = "rows|0||none|0||40000,800020000 40000,800020000" ] \
-		&& ok "a COPY's rows go to the segments as it reads them, and are held where they go one segment after another" \
-		|| notok "a COPY's rows on the segments before its data ends (as read / held)" "$out / $out2 / $out3"
+	out5=$(q 1 "SELECT count(*) || ',' || sum(v) FROM rt_drk;")" "$(q 2 "SELECT count(*) || ',' || sum(v) FROM rt_drk;")
+	[ "$out|$out2|$out4|$out3|$out5" = "rows,rows|0||rows,none|0||rows,none|0||40000,800020000 40000,800020000|40000,800020000 40000,800020000" ] \
+		&& ok "a COPY's rows go to the segments as it reads them; the first segment's alone where they go one segment after another" \
+		|| notok "a COPY's rows on the segments before its data ends (as read / the first segment's / a replicated table's first)" "$out / $out2 / $out4 / $out3 / $out5"
 
 	# Each row goes with its line in the data, and a segment says the line
 	# of the row it fails at: the coordinator found it in the rows it held,
 	# and holds none of these.  And the COPY ends there, as the next of its
-	# data comes, the pipe still open.  A table held says the same line,
-	# once its data has ended; and one whose rows travel as text, a column
-	# of whose type has no binary form, a line far into them.
+	# data comes, the pipe still open -- of a table whose rows go one
+	# segment after another, where the row is the first segment's.  A row of
+	# a segment whose rows are held says the same line, once the data has
+	# ended; and one whose rows travel as text, a column of whose type has
+	# no binary form, a line far into them.
+	k0=$(q 0 "SELECT min(k) FROM rt_d WHERE gp_segment_id = 0 AND k > 2000;")
+	k1=$(q 0 "SELECT min(k) FROM rt_d WHERE gp_segment_id = 1 AND k > 2000;")
 	q 0 "TRUNCATE rt_d, rt_dk; CREATE TABLE rt_dt (k int, v int CHECK (v > 0), a aclitem) DISTRIBUTED BY (k);" >/dev/null
 	out=$(copy_pipe rt_d 3000)
-	out2=$(copy_pipe rt_dk 3000)
+	out2=$(copy_pipe rt_dk "$k0")
+	out4=$(copy_pipe rt_dk "$k1")
 	out3=$(q 0 "COPY rt_dt (k, v) FROM PROGRAM 'seq 1 100000 | sed \"s/.*/&\\t&/; s/^99999\\t.*/99999\\t-1/\"';" | tr '\n' ' ')
-	case "$out|$out2|$out3|$(q 0 "SELECT (SELECT count(*) FROM rt_d) + (SELECT count(*) FROM rt_dk) + (SELECT count(*) FROM rt_dt);")" in
-		*"|1|ERROR:  new row for relation \"rt_d\" violates check constraint \"rt_d_v_check\" DETAIL:  segment "*"): Failing row contains (3000, -1). CONTEXT:  COPY rt_d, line 3000 |none|0|ERROR:  new row for relation \"rt_dk\" violates check constraint \"rt_dk_v_check\" DETAIL:  segment "*"): Failing row contains (3000, -1). CONTEXT:  COPY rt_dk, line 3000 |ERROR:  new row for relation \"rt_dt\" violates check constraint \"rt_dt_v_check\" DETAIL:  segment "*"): Failing row contains (99999, -1, null). CONTEXT:  COPY rt_dt, line 99999 |0")
-			ok "a row that fails on a segment is named by its line of the data, and ends a COPY whose data is still coming" ;;
-		*) notok "a COPY's row failing on a segment (as read / held / as text)" "$out / $out2 / $out3" ;;
+	case "$out|$out2|$out4|$out3|$(q 0 "SELECT (SELECT count(*) FROM rt_d) + (SELECT count(*) FROM rt_dk) + (SELECT count(*) FROM rt_dt);")" in
+		*"|1|ERROR:  new row for relation \"rt_d\" violates check constraint \"rt_d_v_check\" DETAIL:  segment "*"): Failing row contains (3000, -1). CONTEXT:  COPY rt_d, line 3000 |"*"|1|ERROR:  new row for relation \"rt_dk\" violates check constraint \"rt_dk_v_check\" DETAIL:  segment 0 ("*"): Failing row contains ($k0, -1). CONTEXT:  COPY rt_dk, line $k0 |rows,none|0|ERROR:  new row for relation \"rt_dk\" violates check constraint \"rt_dk_v_check\" DETAIL:  segment 1 ("*"): Failing row contains ($k1, -1). CONTEXT:  COPY rt_dk, line $k1 |ERROR:  new row for relation \"rt_dt\" violates check constraint \"rt_dt_v_check\" DETAIL:  segment "*"): Failing row contains (99999, -1, null). CONTEXT:  COPY rt_dt, line 99999 |0")
+			ok "a row that fails on a segment is named by its line of the data, and ends a COPY whose data is still coming where the segment's rows go as it is read" ;;
+		*) notok "a COPY's row failing on a segment (as read / the first segment's / a segment's held / as text)" "$out / $out2 / $out4 / $out3" ;;
 	esac
 
 	# What a COPY computes for a row might itself read a table -- a column's
@@ -1251,7 +1270,7 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	out2=$(copy_pipe rt_dc 0)
 	out3=$(q 0 "COPY rt_dq (k, v, p) FROM PROGRAM '$rt_wide';" | tr '\n' ' ')
 	out4=$(q 0 "SELECT (SELECT count(*) || ',' || min(w) || ',' || max(w) FROM rt_df) || ' ' || (SELECT count(*) FROM rt_dc) || ' ' || (SELECT count(*) || ',' || count(DISTINCT w::text) || ',' || (min(w::text) LIKE '%<m>50</m>%') FROM rt_dq);")
-	[ "$out|$out2|$out3|$out4" = "none|0||none|0|||40000,50,50 40000 300,1,true" ] \
+	[ "$out|$out2|$out3|$out4" = "none,none|0||none,none|0|||40000,50,50 40000 300,1,true" ] \
 		&& ok "a COPY whose DEFAULT or domain might read a table has its rows held, and reads it" \
 		|| notok "a COPY that computes a value by a query (a DEFAULT / a domain / query_to_xml)" "$out / $out2 / $out3 / $out4"
 	out=$(printf '%s\n' "COPY rt_dx (k, v, p) FROM PROGRAM '$rt_wide';" \
@@ -1264,15 +1283,18 @@ mine" ] && ok "a transaction reads its own rows, and a LIMIT leaves the connecti
 	esac
 
 	# A replicated table's rows go to every segment as they are read, and
-	# are counted once; and a COPY cancelled while its rows go ends, the
-	# segments reading slowly here by a check that sleeps.
+	# are counted once -- and where the first segment's alone go so, a
+	# primary key's table, once too; and a COPY cancelled while its rows go
+	# ends, the segments reading slowly here by a check that sleeps.
 	out=$(printf '%s\n' "CREATE TABLE rt_dr (k int, v int) DISTRIBUTED REPLICATED;" \
-		"COPY rt_dr FROM PROGRAM 'seq 1 100000 | sed \"s/.*/&\\t&/\"';" | "$PSQL" -X -h "$(sockdir 0)" -p "$(port 0)" -d postgres 2>&1 | tr '\n' ' ')
-	n1=$(q 1 "SELECT count(*) FROM rt_dr;"); n2=$(q 2 "SELECT count(*) FROM rt_dr;")
+		"COPY rt_dr FROM PROGRAM 'seq 1 100000 | sed \"s/.*/&\\t&/\"';" \
+		"COPY rt_drk FROM PROGRAM 'seq 40001 100000 | sed \"s/.*/&\\t&/\"';" | "$PSQL" -X -h "$(sockdir 0)" -p "$(port 0)" -d postgres 2>&1 | tr '\n' ' ')
+	n1=$(q 1 "SELECT count(*) FROM rt_dr;")" "$(q 1 "SELECT count(*) FROM rt_drk;")
+	n2=$(q 2 "SELECT count(*) FROM rt_dr;")" "$(q 2 "SELECT count(*) FROM rt_drk;")
 	out2=$(printf '%s\n' "SET statement_timeout = '1s';" "COPY rt_s FROM PROGRAM 'seq 1 300000 | sed \"s/.*/&\\t&/\"';" \
 		"RESET statement_timeout;" "INSERT INTO rt_s VALUES (2, 2);" "SELECT count(*) FROM rt_s;" |
 		timeout 120 "$PSQL" -X -q -t -A -h "$(sockdir 0)" -p "$(port 0)" -d postgres -f - 2>&1 | grep -v "^CONTEXT\|^COPY rt_s, line" | sed 's/^psql:<stdin>:[0-9]*: //' | tr '\n' ' ')
-	[ "$out|$n1|$n2" = "CREATE TABLE COPY 100000 |100000|100000" ] &&
+	[ "$out|$n1|$n2" = "CREATE TABLE COPY 100000 COPY 60000 |100000 100000|100000 100000" ] &&
 	[ "$out2" = "ERROR:  canceling statement due to statement timeout 2 " ] \
 		&& ok "a replicated table's rows go to every segment as they are read; a COPY cancelled while its rows go ends" \
 		|| notok "a COPY as it is read: a replicated table, a cancel" "$out / $n1 / $n2 / $out2"
@@ -5020,11 +5042,12 @@ SQL
 	out2=$(q 0 "SELECT count(*) FROM rt_kd;")
 	[ "$out|$out2" = "11|200" ] && ok "with it, rows go at once into a table with a unique index too" \
 		|| notok "the route of a COPY's rows with the detector on" "$out / $out2"
-	# ... and a COPY's go there as it reads them (section 8).
+	# ... and a COPY's go there as it reads them, every segment's (section
+	# 8).
 	q 0 "CREATE TABLE rt_dkd (k int PRIMARY KEY, v int) DISTRIBUTED BY (k);" >/dev/null
 	out=$(copy_pipe rt_dkd 0)
 	out2=$(q 0 "SELECT count(*) FROM rt_dkd;")
-	[ "$out|$out2" = "rows|0||40000" ] && ok "with it, a COPY's rows go as they are read into a table with a unique index too" \
+	[ "$out|$out2" = "rows,rows|0||40000" ] && ok "with it, a COPY's rows go as they are read into a table with a unique index too" \
 		|| notok "a COPY's rows as they are read with the detector on" "$out / $out2"
 
 	printf '%s\n' "BEGIN;" "UPDATE gdd SET val = val WHERE id = $r0;" "SELECT pg_sleep(2);" "COMMIT;" |

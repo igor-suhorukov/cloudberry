@@ -41,11 +41,13 @@
  * each row as it parses it (cdbCopySendData(), cdbcopy.c) -- and nothing of
  * the data is kept here but a piece a segment.  Each row goes with its line
  * in the data, which the segment says where the row fails there
- * (gp_copyin.c).  Where the rows must go one segment after another they
- * are held until the data is read, as an INSERT's; and where a value the
- * COPY computes for a row might itself run a query -- a DEFAULT or a
- * domain's CHECK that calls a function not written in C -- for which the
- * segments' connections must be free (copy_may_query()).
+ * (gp_copyin.c).  Where the rows must go one segment after another, the
+ * first segment's go as they are read, and the others' are held until the
+ * data is read and go after it, in their order, as an INSERT's do; and all
+ * are held where a value the COPY computes for a row might itself run a
+ * query -- a DEFAULT or a domain's CHECK that calls a function not written
+ * in C -- for which the segments' connections must be free
+ * (copy_may_query()).
  *
  * UPDATE and DELETE.  A statement whose rows are all on the segment where the
  * row it changes is -- it reads the table it changes, and nothing else but
@@ -207,11 +209,14 @@ typedef struct GpRouter
 	 * A COPY's rows may go as they are read, where reading them runs
 	 * nothing on the segments (copy_may_query()); whether they do is
 	 * decided once it has read a piece's worth of its data
-	 * (router_decide()).  Then each segment's go through its "segs".
+	 * (router_decide()).  Then each segment's go through its "segs" -- or
+	 * the first segment's alone, where they go one segment after another
+	 * ("first_only"), the others' held.
 	 */
 	bool		may_stream;
 	bool		decided;
 	bool		streaming;
+	bool		first_only;
 	RouterSeg  *segs;
 	MemoryContext rowcxt;		/* a row's values as text or bytes, per row */
 
@@ -505,11 +510,21 @@ router_encode(GpRouter *r, TupleTableSlot *slot, StringInfo buf)
 		appendStringInfoChar(buf, '\n');
 }
 
-/* What a segment's rows as they are read are in: a replicated table's, one. */
+/*
+ * Does a piece of the rows as they are read go to every segment: a
+ * replicated table's, unless the first segment's alone go so?
+ */
+static inline bool
+router_stream_all(GpRouter *r)
+{
+	return r->replicated && !r->first_only;
+}
+
+/* What a segment's rows as they are read are in: one, where they go to all. */
 static inline RouterSeg *
 router_seg(GpRouter *r, int seg)
 {
-	return &r->segs[r->replicated ? 0 : seg];
+	return &r->segs[router_stream_all(r) ? 0 : seg];
 }
 
 /* A row's line onto a piece's: the difference, zigzag, seven bits a byte. */
@@ -573,20 +588,20 @@ router_stream_fail(GpRouter *r)
 }
 
 /*
- * Send a segment's piece now -- a replicated table's to every segment --
- * and begin the next: the segment's COPY is begun with its first piece,
- * and the piece waits until the last one sent there has left, so that no
- * more is held here than a piece a segment, and a segment that reads
- * slowly slows the reading of the data to what it takes, as Cloudberry's
- * COPY is slowed by a segment it cannot send to (cdbCopySendData(),
- * cdbcopy.c).
+ * Send a segment's piece now -- a replicated table's to every segment, where
+ * they all take it as it is read -- and begin the next: the segment's COPY
+ * is begun with its first piece, and the piece waits until the last one
+ * sent there has left, so that no more is held here than a piece a
+ * segment, and a segment that reads slowly slows the reading of the data
+ * to what it takes, as Cloudberry's COPY is slowed by a segment it cannot
+ * send to (cdbCopySendData(), cdbcopy.c).
  */
 static void
 router_stream_piece(GpRouter *r, int seg)
 {
 	RouterSeg  *rs = router_seg(r, seg);
-	int			first = r->replicated ? 0 : seg;
-	int			last = r->replicated ? r->nsegs - 1 : seg;
+	int			first = router_stream_all(r) ? 0 : seg;
+	int			last = router_stream_all(r) ? r->nsegs - 1 : seg;
 	bool		was_sending = r->sending;
 	bool		ready;
 
@@ -665,11 +680,18 @@ router_stream_row(GpRouter *r, int seg, TupleTableSlot *slot, uint64 lineno)
 
 /*
  * A COPY has read a piece's worth of its data, and its rows may go as they
- * are read (copy_may_query()): do they?  Where they may go to every segment
- * at once (router_sends_at_once()), or there is one segment.  Then the rows
- * held so far are sent on, and every row after them as it is put.
- * Otherwise they are held to the data's end, as an INSERT's are until its
- * plan has finished with the segments, and go one segment after another.
+ * are read (copy_may_query()): which do?  Every segment's, where they may go
+ * to every segment at once (router_sends_at_once()), or there is one
+ * segment.  Otherwise the first segment's: the others' are held to the
+ * data's end and go after it, one segment after another in their order, as
+ * an INSERT's do once its plan has finished with the segments.  The first
+ * segment's COPY is still the first begun, and ends before the next is, so
+ * the order that keeps two such statements from waiting for each other on
+ * different segments is kept; and that segment loads while the data is
+ * read, its share of the rows never held.  A replicated table's rows are
+ * every segment's: held for the others as they go to the first.  The rows
+ * held so far for a segment whose rows go now are sent on, and every row
+ * after them as it is put.
  *
  * A COPY of less data than that decides nothing: its rows go as it ends,
  * as they went, to the segments it has rows for and no other.
@@ -680,11 +702,10 @@ router_decide(GpRouter *r)
 	int			natts = RelationGetDescr(r->rel)->natts;
 
 	r->decided = true;
-	if (r->nsegs > 1 && !router_sends_at_once(r->rel))
-		return;
 	r->streaming = true;
+	r->first_only = r->nsegs > 1 && !router_sends_at_once(r->rel);
 
-	for (int seg = 0; seg < r->nsegs; seg++)
+	for (int seg = 0; seg < (r->first_only ? 1 : r->nsegs); seg++)
 	{
 		Tuplestorestate *store = r->stores[seg];
 
@@ -701,6 +722,8 @@ router_decide(GpRouter *r)
 				line = (uint64) DatumGetInt64(slot_getattr(r->slot, natts + 1, &isnull));
 			router_stream_row(r, seg, r->slot, line);
 		}
+		if (r->first_only && r->replicated)
+			continue;
 		tuplestore_end(store);
 		r->stores[seg] = NULL;
 	}
@@ -719,10 +742,12 @@ router_put(GpRouter *r, TupleTableSlot *slot, uint64 lineno)
 		seg = 0;				/* one copy, sent to every segment */
 	r->nrows++;
 
-	if (r->streaming)
+	if (r->streaming && (!r->first_only || seg == 0))
 	{
 		router_stream_row(r, seg, slot, lineno);
-		return;
+		/* a replicated table's row is the segments' after the first too */
+		if (!r->first_only || !r->replicated)
+			return;
 	}
 
 	if (r->stores[seg] == NULL)
@@ -931,12 +956,15 @@ router_finish(GpRouter *r)
 
 	r->sending = true;
 
-	/* Gone as they were read: each segment's last piece, and the end. */
+	/*
+	 * Gone as they were read: each segment's last piece, and the end -- the
+	 * first segment's alone, where the others' are held to go after it.
+	 */
 	if (r->streaming)
 	{
 		uint64	   *counts = palloc0_array(uint64, r->nsegs);
 
-		for (int seg = 0; seg < (r->replicated ? 1 : r->nsegs); seg++)
+		for (int seg = 0; seg < (router_stream_all(r) ? 1 : r->nsegs); seg++)
 		{
 			RouterSeg  *rs = &r->segs[seg];
 
@@ -952,18 +980,22 @@ router_finish(GpRouter *r)
 				nsegs++;
 		if (GpCopyInFailed())
 			router_stream_fail(r);
-		GpCopyInEnd(counts);
+		/* none, where the first segment had no rows to go as they were read */
+		if (nsegs > 0)
+			GpCopyInEnd(counts);
 		for (int i = 0; i < nsegs; i++)
 			total = r->replicated ? counts[i] : total + counts[i];
 		pfree(counts);
-		return total;
+		if (!r->first_only)
+			return total;
+		nsegs = 0;
 	}
 
-	for (int seg = 0; seg < r->nsegs; seg++)
+	for (int seg = r->first_only ? 1 : 0; seg < r->nsegs; seg++)
 		if (r->stores[r->replicated ? 0 : seg] != NULL)
 			segs[nsegs++] = seg;
 
-	if (nsegs > 1 && router_sends_at_once(r->rel))
+	if (!r->first_only && nsegs > 1 && router_sends_at_once(r->rel))
 	{
 		if (r->reached_stmt != NULL && !r->replicated)
 			GpReportDtxReached(r->reached_stmt, segs, nsegs);
