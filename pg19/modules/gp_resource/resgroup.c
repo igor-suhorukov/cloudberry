@@ -61,6 +61,15 @@
  * makes a group's cgroup, and sets its limits, as the dispatch first tells
  * it of them, so that a segment host has the coordinator's.
  *
+ * A single node is its own coordinator: a transaction takes its group's
+ * slot there too, and its backend moves into the group's cgroup, so that a
+ * group's concurrency, its CPU and its memory hold on one node as they do
+ * on a cluster's coordinator.  That is the port's.  Cloudberry's single
+ * node, whose sessions are utility sessions, sets the groups up -- their
+ * definitions, their cgroups -- and assigns no transaction to one:
+ * ShouldAssignResGroupOnMaster() asks for the dispatcher's role, where what
+ * a resource queue asks is that or a single node.
+ *
  * What is not: Cloudberry's wait event of a group's waiter is of a type of
  * its own, "ResourceGroup", and names the group; PostgreSQL 19's waits of a
  * module are of type Extension, and a module registers each name once, of a
@@ -735,7 +744,7 @@ ResGroupCheckDrop(Oid groupid, const char *name)
 {
 	ResGroupEntry *e;
 
-	if (!GpResourceIsCoordinator() || rg_ctl == NULL)
+	if (!GpResourceIsDispatcher() || rg_ctl == NULL)
 		return;
 	ensure_loaded();
 	LWLockAcquire(rg_lock, LW_EXCLUSIVE);
@@ -1172,7 +1181,7 @@ group_cpu_max_percent(Oid groupid)
 }
 
 /*
- * The transaction's first statement, on the coordinator
+ * The transaction's first statement, on the coordinator or a single node
  * (AssignResGroupOnMaster()): the transaction runs bypassed, or takes a
  * slot of its group, waiting for one.
  */
@@ -1183,7 +1192,7 @@ ResGroupStatementStart(const char *query_string)
 
 	move_poll();
 	if (xact_decided || !IsResGroupEnabled() || rg_ctl == NULL ||
-		!GpResourceIsCoordinator() || MyBackendType != B_BACKEND ||
+		!GpResourceIsDispatcher() || MyBackendType != B_BACKEND ||
 		!IsNormalProcessingMode() || proc_exit_inprogress ||
 		!IsTransactionState() || !have_proc() || my_proc()->waiting)
 		return;
@@ -1250,7 +1259,7 @@ unassign(void)
 	my_group = InvalidOid;
 	my_bypassed = false;
 
-	if (had_slot && GpResourceIsCoordinator())
+	if (had_slot && GpResourceIsDispatcher())
 		(void) GP_FAULT("unassign_resgroup_end_qd");
 }
 
@@ -1303,7 +1312,7 @@ ResGroupExecutorStart(QueryDesc *queryDesc, bool toplevel)
 	int			min_cost = 0;
 	ResGroupEntry *e;
 
-	if (!IsResGroupEnabled() || rg_ctl == NULL || !GpResourceIsCoordinator())
+	if (!IsResGroupEnabled() || rg_ctl == NULL || !GpResourceIsDispatcher())
 		return;
 	move_poll();
 	(void) GP_FAULT("check_and_unassign_from_resgroup_entry");

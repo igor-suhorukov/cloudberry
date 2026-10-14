@@ -360,7 +360,9 @@ define_settings(void)
 /*
  * Where a query takes a queue's slot and a transaction a group's: the
  * coordinator of a cluster, or a single node -- Cloudberry's
- * Gp_role == GP_ROLE_DISPATCH || IS_SINGLENODE().  Not a retrieve session,
+ * Gp_role == GP_ROLE_DISPATCH || IS_SINGLENODE(), which is what it asks
+ * of a queue's slot; of a group's it asks the dispatcher's role alone, and
+ * the port a single node too (resgroup.c).  Not a retrieve session,
  * whose RETRIEVE reads the rows of a cursor that took its slot, and which is
  * a utility session in Cloudberry, where it takes none (gp_endpoint.c); on a
  * cluster its role says so.

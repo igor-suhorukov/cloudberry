@@ -188,7 +188,10 @@ IsResGroupEnabled(void)
 		 gp_resource_manager_policy == RESOURCE_MANAGER_POLICY_GROUP_V2);
 }
 
-/* The coordinator, or a single node: where a query takes a queue's slot */
+/*
+ * The coordinator, or a single node: where a query takes a queue's slot and
+ * a transaction a group's
+ */
 extern bool GpResourceIsDispatcher(void);
 extern bool GpResourceIsSegment(void);
 extern bool GpResourceIsCoordinator(void);
