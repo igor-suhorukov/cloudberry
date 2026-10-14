@@ -91,6 +91,7 @@
 #include <unistd.h>
 
 #include "access/htup_details.h"
+#include "access/parallel.h"
 #include "access/transam.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
@@ -1181,6 +1182,38 @@ group_cpu_max_percent(Oid groupid)
 }
 
 /*
+ * A parallel worker of a query that runs where transactions take their
+ * slots, a single node's above all, which plans as PostgreSQL does: the
+ * worker moves into the cgroup of the group its leader's transaction runs
+ * in, so that what the group may have of the CPU is what the query may.
+ * It takes no slot, the query's being its leader's.  A segment's worker
+ * learns its group as the segment's backend does, from the dispatch
+ * (ResGroupSegmentStatementStart()).
+ */
+static void
+worker_joins_leader(void)
+{
+	static bool joined = false;
+	PGPROC	   *leader = MyProc->lockGroupLeader;
+	int			procno;
+	Oid			groupid = InvalidOid;
+
+	if (joined || !IsResGroupEnabled() || rg_ctl == NULL ||
+		!GpResourceIsDispatcher() || leader == NULL || leader == MyProc)
+		return;
+	joined = true;
+	procno = GetNumberFromPGProc(leader);
+	if (procno < 0 || procno >= MaxBackends)
+		return;
+	LWLockAcquire(rg_lock, LW_SHARED);
+	if (rg_ctl->procs[procno].has_slot || rg_ctl->procs[procno].bypassed)
+		groupid = rg_ctl->procs[procno].groupid;
+	LWLockRelease(rg_lock);
+	if (OidIsValid(groupid))
+		attach_cgroup(groupid, group_cpu_max_percent(groupid));
+}
+
+/*
  * The transaction's first statement, on the coordinator or a single node
  * (AssignResGroupOnMaster()): the transaction runs bypassed, or takes a
  * slot of its group, waiting for one.
@@ -1191,6 +1224,11 @@ ResGroupStatementStart(const char *query_string)
 	Oid			groupid;
 
 	move_poll();
+	if (IsParallelWorker())
+	{
+		worker_joins_leader();
+		return;
+	}
 	if (xact_decided || !IsResGroupEnabled() || rg_ctl == NULL ||
 		!GpResourceIsDispatcher() || MyBackendType != B_BACKEND ||
 		!IsNormalProcessingMode() || proc_exit_inprogress ||

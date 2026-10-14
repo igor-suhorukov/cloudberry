@@ -698,7 +698,8 @@ the core series, O25:
   Cloudberry's bypass says, and a segment's backend runs in the group the
   dispatch names.  A single node takes a transaction into its group as a
   cluster's coordinator does, where Cloudberry's single node sets the
-  groups up and assigns no transaction to one.  A query runs with its
+  groups up and assigns no transaction to one; and a parallel worker of a
+  query there runs in its leader's group's cgroup.  A query runs with its
   budget — statement_mem, its queue's or its group's share — as its
   work_mem.  The groups' cgroups are
   Cloudberry's code, compiled where it lies (`compat/resgroup/`), v2's on
