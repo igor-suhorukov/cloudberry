@@ -250,7 +250,7 @@ skip workfile/hashjoin_spill  the workfile manager and its views; Track B's spil
 skip query_finish_pending  the fault injector, which is Track E's; the port has none yet
 run  sequence_gp                                          cb1
 run  tidscan_gp                                           cb1
-skip agg_pushdown  gp_enable_agg_pushdown, which the plan replaces with PostgreSQL 19's eager aggregation (Track A 2.7)
+run  agg_pushdown                                         cb1
 run  subselect_gp                                         cb1
 run  subselect_gp2                                        cb1
 run  partition                                            cb2
