@@ -170,6 +170,13 @@ ao_vacuum_indexes(Relation rel, IndexBulkDeleteCallback callback, void *state,
  * part of a distributed transaction a distributed snapshot may not see yet
  * (gp_dtx.c), and a VACUUM's compaction is never such a part.  A backend
  * that takes its snapshot later sees xid committed.
+ *
+ * Not a lazy VACUUM's, which reads no table's rows by its snapshot:
+ * PostgreSQL's horizons pass over it (PROC_IN_VACUUM), and so does
+ * Cloudberry's recycling of a segment file, by
+ * GetOldestNonRemovableTransactionId().  An autovacuum worker's VACUUM of
+ * gp_ao.blkdir, which every append-optimized table's writes leave work for,
+ * held a file so on a segment through two VACUUMs in a row.
  */
 static bool
 compaction_may_be_seen_running(TransactionId xid)
@@ -178,7 +185,7 @@ compaction_may_be_seen_running(TransactionId xid)
 
 	if (TransactionIdIsInProgress(xid))
 		return true;
-	pfree(GetCurrentVirtualXIDs(xid, true, false, 0, &n));
+	pfree(GetCurrentVirtualXIDs(xid, true, false, PROC_IN_VACUUM, &n));
 	return n > 0;
 }
 
