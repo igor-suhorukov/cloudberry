@@ -1961,6 +1961,9 @@ gang_get(void)
 {
 	static LocalTransactionId checked = InvalidLocalTransactionId;
 
+	/* not an autovacuum worker's, nor a VACUUM's as it vacuums a table */
+	GpDtxCheckSender();
+
 	/* the segments added or removed since, taken before the gang is used */
 	GpClusterDecideSegments();
 

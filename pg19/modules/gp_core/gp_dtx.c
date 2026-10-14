@@ -77,11 +77,14 @@
  * For both a segment needs the coordinator ID of each local transaction a
  * distributed one prepared here, or committed in one phase: a map, in shared
  * memory, filled as each is prepared or commits so, and emptied of those
- * every snapshot now in use says committed.  Because a segment commits a
- * prepared part only after the coordinator committed, the order of commits
- * the coordinator's snapshots see is the order in which anything on a
- * segment could have seen them: a transaction that waited here for another's
- * row, or read it, committed after it there too.
+ * every snapshot now in use says committed -- which the coordinator says with
+ * each snapshot it sends, as the oldest transaction that a snapshot it may
+ * still send can see in progress: not one of an autovacuum worker's or a
+ * lazy VACUUM's, which it never sends (dtx_oldest_sendable()).  Because a
+ * segment commits a prepared part only after the coordinator committed, the
+ * order of commits the coordinator's snapshots see is the order in which
+ * anything on a segment could have seen them: a transaction that waited here
+ * for another's row, or read it, committed after it there too.
  *
  * THE DISTRIBUTED LOG.  The map is logged too, as Cloudberry's distributed
  * log is, in a table of each database, gp_internal.distributed_log: a part
@@ -296,8 +299,9 @@ GpDtxParseGid(const char *gid, FullTransactionId *gxid)
 /*
  * What the setting carries: "xmin:xmax:prune:x1,x2,...", coordinator full
  * transaction IDs in decimal, the in-progress ones in ascending order.
- * "prune" is the oldest transaction any snapshot on the coordinator may still
- * see in progress, so that a segment knows which of its map it may forget.
+ * "prune" is the oldest transaction any snapshot the coordinator may still
+ * send can see in progress, so that a segment knows which of its map it may
+ * forget (dtx_oldest_sendable()).
  */
 typedef struct GpDtxSnapshot
 {
@@ -318,11 +322,97 @@ fxid_cmp(const void *a, const void *b)
 }
 
 /*
+ * The coordinator's processes whose snapshots the segments are never sent,
+ * and which send them nothing: an autovacuum worker, whose ANALYZE samples
+ * what the coordinator holds (gp_analyze.c) and which runs no statement of a
+ * session's, and a lazy VACUUM as it vacuums a table -- PostgreSQL's own
+ * horizons pass over that one too (PROC_IN_VACUUM).  VACUUM's statement sends
+ * the segments its horizon after the coordinator's VACUUM is done
+ * (GpDispatchHorizon()).
+ */
+#define DTX_SENDS_NOTHING	(PROC_IS_AUTOVACUUM | PROC_IN_VACUUM)
+
+/*
+ * The coordinator: the oldest transaction a snapshot that may still be sent
+ * to the segments can see in progress, "prune" before the snapshot's own
+ * xmin and the transactions in their second phase lower it.  The oldest
+ * transaction ID or xmin of a process that may send one, or the one after
+ * latestCompletedXid where there is none, and no later than a replication
+ * slot's xmin -- a standby's, whose queries the mirrors answer -- read under
+ * ProcArrayLock, so that no transaction ends while they are: PostgreSQL's
+ * GetOldestTransactionIdConsideredRunning() of those processes alone.  That
+ * one counted an autovacuum worker's ANALYZE of pg_class too: done as a
+ * statement's parts committed, it held them in every segment's map, and a
+ * VACUUM there kept the file it had compacted for them (isolation2's
+ * uao/ao_unique_index_vacuum_row).
+ *
+ * Every database's processes: a statement of one database forgets the parts
+ * of every database a segment holds, the map being the node's, and another
+ * database's snapshots read the shared catalogs too.  Not a prepared
+ * transaction, whose dummy process holds no snapshot, and whose transaction
+ * on the coordinator is a part of the loopback's (gp_loopback.c), not a
+ * distributed one -- the coordinator's own commit decides those; nor a
+ * logical slot's catalog xmin, which nothing sent reads by.
+ */
+static TransactionId
+dtx_oldest_sendable(void)
+{
+	TransactionId slot_xmin;
+	TransactionId oldest;
+
+	ProcArrayGetReplicationSlotXmin(&slot_xmin, NULL);
+
+	LWLockAcquire(ProcArrayLock, LW_SHARED);
+	oldest = XidFromFullTransactionId(TransamVariables->latestCompletedXid);
+	TransactionIdAdvance(oldest);
+	for (uint32 i = 0; i < ProcGlobal->allProcCount; i++)
+	{
+		PGPROC	   *proc = GetPGProcByNumber(i);
+		TransactionId xid;
+		TransactionId xmin;
+
+		/* a process there, as ProcNumberGetTransactionIds() tells one */
+		if (proc->pid == 0 || (proc->statusFlags & DTX_SENDS_NOTHING) != 0)
+			continue;
+		xid = *(volatile TransactionId *) &proc->xid;
+		xmin = *(volatile TransactionId *) &proc->xmin;
+		if (TransactionIdIsNormal(xid) && TransactionIdPrecedes(xid, oldest))
+			oldest = xid;
+		if (TransactionIdIsNormal(xmin) && TransactionIdPrecedes(xmin, oldest))
+			oldest = xmin;
+	}
+	LWLockRelease(ProcArrayLock);
+
+	if (TransactionIdIsNormal(slot_xmin) && TransactionIdPrecedes(slot_xmin, oldest))
+		oldest = slot_xmin;
+	return oldest;
+}
+
+/*
+ * The coordinator: a process that dtx_oldest_sendable() passes over uses no
+ * segment.  A snapshot of its might need parts the segments have forgotten,
+ * and a part of its could be forgotten while its transaction is still in
+ * progress.  gp_core sends nothing from them; a function they call might.
+ */
+void
+GpDtxCheckSender(void)
+{
+	if ((MyProc->statusFlags & PROC_IS_AUTOVACUUM) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("an autovacuum worker cannot run a statement on the segments")));
+	if ((MyProc->statusFlags & PROC_IN_VACUUM) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("VACUUM cannot run a statement on the segments while it vacuums a table")));
+}
+
+/*
  * The coordinator: a statement's snapshot, as the segments are sent it.  The
  * same snapshot is asked for by each dispatch of a statement, so the last
  * answer is kept.
  */
-static char *dtx_snapshot_string(Snapshot snapshot);
+static char *dtx_snapshot_string(Snapshot snapshot, TransactionId prune);
 
 char *
 GpDtxSnapshotString(Snapshot snapshot)
@@ -332,6 +422,7 @@ GpDtxSnapshotString(Snapshot snapshot)
 	static TransactionId last_xmax = InvalidTransactionId;
 	static uint32 last_xcnt = 0;
 	static char *last = NULL;
+	TransactionId prune;
 	char	   *str;
 
 	if (snapshot == NULL || snapshot->snapshot_type != SNAPSHOT_MVCC)
@@ -341,14 +432,19 @@ GpDtxSnapshotString(Snapshot snapshot)
 	 * A hot standby coordinator's snapshot has no transaction in xip, and
 	 * its distributed snapshot hides the transactions in their second phase
 	 * besides: the same for a snapshot each time it is asked, which is
-	 * gp_dtx_standby.c's to keep.  Not before the standby knows them.
+	 * gp_dtx_standby.c's to keep.  Not before the standby knows them.  Its
+	 * "prune" is PostgreSQL's, the transactions the standby knows of: the
+	 * mirrors forget nothing by it.
 	 */
 	if (snapshot->takenDuringRecovery)
 	{
 		GpDtxStandbyWaitKnown();
 		if (last != NULL)
 			pfree(last);
-		str = dtx_snapshot_string(snapshot);
+		prune = GetOldestTransactionIdConsideredRunning();
+		if (TransactionIdPrecedes(snapshot->xmin, prune))
+			prune = snapshot->xmin;
+		str = dtx_snapshot_string(snapshot, prune);
 		last = MemoryContextStrdup(TopMemoryContext, str);
 		pfree(str);
 		last_snapshot = NULL;
@@ -360,7 +456,11 @@ GpDtxSnapshotString(Snapshot snapshot)
 		snapshot->xcnt == last_xcnt)
 		return last;
 
-	str = dtx_snapshot_string(snapshot);
+	/* this one is sent too, to be read with */
+	prune = dtx_oldest_sendable();
+	if (TransactionIdPrecedes(snapshot->xmin, prune))
+		prune = snapshot->xmin;
+	str = dtx_snapshot_string(snapshot, prune);
 	if (last != NULL)
 		pfree(last);
 	last = MemoryContextStrdup(TopMemoryContext, str);
@@ -380,20 +480,32 @@ GpDtxSnapshotString(Snapshot snapshot)
  * next statement that brought a snapshot.  Never the answer kept above: the
  * oldest transaction a snapshot may see in progress moves while a snapshot's
  * own numbers stay.
+ *
+ * Its "prune" is reckoned before the snapshot is taken, this backend's
+ * catalog snapshot let go first, and is not lowered to either's xmin:
+ * neither is sent to be read with, the snapshot's numbers saying only what
+ * a segment waits for, and either's xmin may be an autovacuum worker's
+ * transaction, there for the moment its ANALYZE writes the statistics.  A
+ * snapshot this transaction takes later, and sends, sees every part older
+ * than "prune" committed.
  */
 char *
 GpDtxHorizonString(void)
 {
+	TransactionId prune;
 	char	   *str;
 
+	InvalidateCatalogSnapshot();
+	prune = dtx_oldest_sendable();
 	PushActiveSnapshot(GetTransactionSnapshot());
-	str = dtx_snapshot_string(GetActiveSnapshot());
+	str = dtx_snapshot_string(GetActiveSnapshot(), prune);
 	PopActiveSnapshot();
 	return str;
 }
 
 /*
- * A snapshot of the coordinator's, as the setting carries it.
+ * A snapshot of the coordinator's, as the setting carries it, with the
+ * caller's "prune".
  *
  * A hot standby coordinator's is a snapshot of the same transactions, the
  * coordinator's, as far as the standby has replayed them: the ones in
@@ -411,21 +523,17 @@ GpDtxHorizonString(void)
  * standby's queries.  A mirror forgets nothing by a standby's word.
  */
 static char *
-dtx_snapshot_string(Snapshot snapshot)
+dtx_snapshot_string(Snapshot snapshot, TransactionId prune)
 {
 	FullTransactionId next;
 	FullTransactionId *xip;
 	FullTransactionId fxmin;
 	FullTransactionId fprune;
 	FullTransactionId committing;
-	TransactionId prune;
 	StringInfoData buf;
 	int			n = 0;
 
 	next = ReadNextFullTransactionId();
-	prune = GetOldestTransactionIdConsideredRunning();
-	if (TransactionIdPrecedes(snapshot->xmin, prune))
-		prune = snapshot->xmin;
 	fxmin = FullTransactionIdFromAllowableAt(next, snapshot->xmin);
 	fprune = FullTransactionIdFromAllowableAt(next, prune);
 

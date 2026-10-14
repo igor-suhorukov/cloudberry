@@ -94,6 +94,13 @@ extern void GpDtxRedoGxid(const char *data, int len);
 extern char *GpDtxSnapshotString(Snapshot snapshot);
 
 /*
+ * The coordinator: an error in a process whose snapshots the segments are
+ * never sent -- an autovacuum worker, a VACUUM while it vacuums a table --
+ * and which therefore uses no segment (gp_dtx.c, "prune").
+ */
+extern void GpDtxCheckSender(void);
+
+/*
  * The coordinator: a transaction's second phase did not reach a segment, and
  * the recovery process should finish it now rather than at its next round.
  */
