@@ -245,9 +245,9 @@ run  matview_ao                                           cb1
 run  gpcopy                                               cb1
 run  incremental_analyze                                  cb1
 run  indexjoin                                            cb1
-skip workfile/hashagg_spill  the workfile manager and its views; Track B's spill-file hook is not built
-skip workfile/hashjoin_spill  the workfile manager and its views; Track B's spill-file hook is not built
-skip query_finish_pending  the fault injector, which is Track E's; the port has none yet
+skip workfile/hashagg_spill  its checks count the Workfile: (N spilling) lines of an EXPLAIN ANALYZE, which the port prints for a segment's slice alone (gp_explain.c), so none on one node: each call of its counting function returns no row where Cloudberry's returns a row, and the suite, which compares no plans, passes over all of them but one -- atmsort takes a call whose argument begins an EXPLAIN on the call's line for an EXPLAIN
+skip workfile/hashjoin_spill  as workfile/hashagg_spill: its four checks return no row on one node, and the suite passes over every one of them, so the test would pass with no spill seen
+skip query_finish_pending  the faults execsort_sort_bounded_heap, execsort_sort_mergeruns and execsort_dumptuples in PostgreSQL's tuplesort.c, and Cloudberry's QueryFinishPending, which a finish_pending fault sets and its sorts stop at: gp_inject_fault takes the fault type and does nothing with it, and PostgreSQL 19 has no such flag; and execshare_input_next, of Cloudberry's ShareInputScan, where PostgreSQL's plan of the CTE is a CTE Scan
 run  sequence_gp                                          cb1
 run  tidscan_gp                                           cb1
 run  agg_pushdown                                         cb1
