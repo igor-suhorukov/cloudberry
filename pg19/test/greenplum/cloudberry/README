@@ -551,12 +551,6 @@ percentile  median(), a plain aggregate of the port's (gp_median.c): a
   Cloudberry refuses as an aggregate nested.  And PostgreSQL 19's words for
   a call no function takes -- a DETAIL where Cloudberry's HINT stood.
 
-pg_stat  the scans of its table after SET enable_seqscan TO off: the
-  planner's route has the segment plan its fragment, and the setting,
-  the coordinator's, is none a gang is sent, so the segment reads the
-  table where Cloudberry's plan reads the index -- a sequential scan more
-  and the rows it read, and no index scan.
-
 planhints (orca)  ORCA's trace of the hints it read, which Cloudberry's
   expected output for its ORCA, planhints_optimizer.out, prints as the
   port's ORCA does, where the one the suite compares, the planner's, has

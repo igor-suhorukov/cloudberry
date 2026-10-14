@@ -116,19 +116,14 @@ bitmap_index_inspect
   gp_ao's here (bitmap/bitmapinspect.c): the meta page, which pages are
   which, and the errors are Cloudberry's.
 
-brin_heap, and brin_heap.planner for the planner pass
+brin_heap
   A page of 8 kB, PostgreSQL's, where Cloudberry's is 32 kB: the block
   populate_pages() fills with the committed rows holds 226 of them, where
   Cloudberry's holds 909, which the count of the rows says.  The pages,
   ranges and summaries pageinspect shows are Cloudberry's: the summary of
   the last, partial range taken while another session extends the table
   (summarize_last_partial_range) covers what the session added, and the
-  ranges over aborted rows are summarized empty.  In the planner pass the
-  segments plan the gather's scan themselves, without the session's
-  enable_seqscan, which no gang is sent, and read the table whole: no
-  bitmap is built there, and brin_bitmap_page_added is set and never hit,
-  where Cloudberry's -- and the ORCA pass's, whose fragments the segments
-  run as planned -- adds the one page and the two pages the scans want.
+  ranges over aborted rows are summarized empty.
 
 concurrent_partition_table_operations_should_not_deadlock, and its
 _optimizer output, which the orca pass is compared with
@@ -512,11 +507,10 @@ uao/insert_policy_row and _column
 vacuum_full_interrupt
   EXPLAIN's plan, which the session makes with the planner in either pass:
   the port's planner gathers the table from the segments with a query of
-  its own, which each segment plans for itself -- with the session's
-  enable_* settings or not, which are not among those the port sends the
-  segments (gp_dispatch.c) -- and the coordinator's EXPLAIN shows no scan
-  beneath its Gather Motion, where Cloudberry's shows the Index Scan its
-  segments run.  The rest is Cloudberry's: segment 0's VACUUM FULL,
+  its own, which each segment plans for itself, with the session's
+  planner settings (gp_dispatch.c), and the coordinator's EXPLAIN shows no
+  scan beneath its Gather Motion, where Cloudberry's shows the Index Scan
+  its segments run.  The rest is Cloudberry's: segment 0's VACUUM FULL,
   cancelled once its relation's files are swapped, leaves its pg_class row
   as it was, relfrozenxid and relhasindex with it, and the rows inserted
   after it are read back.

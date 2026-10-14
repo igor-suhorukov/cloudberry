@@ -4238,6 +4238,27 @@ ERROR:  cannot change materialized view "mvw_empty"'
 		*) notok "a SET a segment refuses" "$out" ;;
 	esac
 
+	# PostgreSQL's planner settings of the session are the segments' too,
+	# which plan their part of a statement themselves on the planner's
+	# route, as the coordinator would plan it whole: with enable_seqscan
+	# and enable_bitmapscan off there, a segment reads a table through its
+	# index.  Shown by the order of the rows a segment sends, with no ORDER
+	# BY: the table's rows, all on one segment, were written in descending
+	# order.  And what the segments say the settings are, work_mem's and a
+	# cost's among them.
+	q 0 "CREATE TABLE ps (d int, k int) DISTRIBUTED BY (d);
+	     INSERT INTO ps SELECT 1, g FROM generate_series(1000, 1, -1) g;
+	     CREATE INDEX ps_k ON ps (k); ANALYZE ps;" >/dev/null
+	out=$(printf '%s\n' "SET gp.optimizer = off;" \
+		"SELECT string_agg(k::text, ',') FROM (SELECT k FROM ps WHERE k > 0 LIMIT 3) s;" \
+		"SET enable_seqscan = off;" "SET enable_bitmapscan = off;" \
+		"SET work_mem = '8MB';" "SET random_page_cost = 1.5;" \
+		"SELECT string_agg(k::text, ',') FROM (SELECT k FROM ps WHERE k > 0 LIMIT 3) s;" \
+		"SELECT DISTINCT result FROM gp.exec_on_segments('SELECT current_setting(''enable_seqscan'') || '' '' || current_setting(''work_mem'') || '' '' || current_setting(''random_page_cost'')');" | qf 0 | tr '\n' '|')
+	[ "$out" = "1000,999,998|1,2,3|off 8MB 1.5|" ] \
+		&& ok "the session's planner settings are the segments', which plan their part of a statement with them" \
+		|| notok "the planner's settings on the segments (sequential / with enable_seqscan off / the values there)" "$out"
+
 	# SERIALIZABLE is REPEATABLE READ on a cluster, as in Cloudberry: no
 	# node's serializable snapshot isolation sees another's rows.
 	out=$(printf '%s\n' "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE;" \

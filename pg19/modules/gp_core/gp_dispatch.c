@@ -437,6 +437,74 @@ static const char *const synced_settings[] = {
 	"enable_parallel_append",
 	"enable_parallel_hash",
 	/*
+	 * the rest of what PostgreSQL's planner takes from the session, with
+	 * which a segment plans its part of a statement on the planner's route,
+	 * as the coordinator would have planned it: every setting a session may
+	 * set that PostgreSQL marks as one a plan depends on (GUC_EXPLAIN, what
+	 * EXPLAIN (SETTINGS) shows) -- its methods, its costs, GEQO's, how far it
+	 * reorders joins, how much of a cursor's rows it plans for, JIT's, and
+	 * the memory a sort or a hash may take, which the executor holds them to
+	 * as well -- but debug_parallel_query, above, and the I/O and worker
+	 * settings, a node's own, which the planner does not read.
+	 * optimize_bounded_sort is a build's with DEBUG_BOUNDED_SORT alone, and
+	 * passed over in any other.  Cloudberry's coordinator plans the whole
+	 * statement, and of these syncs work_mem, hash_mem_multiplier and JIT's,
+	 * the executor's, and optimize_bounded_sort; a fragment ORCA planned
+	 * carries the coordinator's decisions in its plan.  A statement given a
+	 * budget by a resource group or queue runs with it whatever work_mem says
+	 * (gp_resource.c).
+	 */
+	"enable_async_append",
+	"enable_bitmapscan",
+	"enable_distinct_reordering",
+	"enable_eager_aggregate",
+	"enable_gathermerge",
+	"enable_group_by_reordering",
+	"enable_hashagg",
+	"enable_hashjoin",
+	"enable_incremental_sort",
+	"enable_indexonlyscan",
+	"enable_indexscan",
+	"enable_material",
+	"enable_memoize",
+	"enable_mergejoin",
+	"enable_nestloop",
+	"enable_partition_pruning",
+	"enable_partitionwise_aggregate",
+	"enable_partitionwise_join",
+	"enable_presorted_aggregate",
+	"enable_self_join_elimination",
+	"enable_seqscan",
+	"enable_sort",
+	"enable_tidscan",
+	"optimize_bounded_sort",
+	"seq_page_cost",
+	"random_page_cost",
+	"cpu_tuple_cost",
+	"cpu_index_tuple_cost",
+	"cpu_operator_cost",
+	"effective_cache_size",
+	"min_eager_agg_group_size",
+	"geqo",
+	"geqo_threshold",
+	"geqo_effort",
+	"geqo_pool_size",
+	"geqo_generations",
+	"geqo_selection_bias",
+	"geqo_seed",
+	"constraint_exclusion",
+	"cursor_tuple_fraction",
+	"from_collapse_limit",
+	"join_collapse_limit",
+	"plan_cache_mode",
+	"recursive_worktable_factor",
+	"jit",
+	"jit_above_cost",
+	"jit_inline_above_cost",
+	"jit_optimize_above_cost",
+	"work_mem",
+	"hash_mem_multiplier",
+	/*
 	 * the size of a segment's buffers for its temporary tables, which it
 	 * takes until it has used one and refuses after, as the coordinator does
 	 * -- sent as a SET runs (GpDispatchSyncSettingsNow()), so that the SET is

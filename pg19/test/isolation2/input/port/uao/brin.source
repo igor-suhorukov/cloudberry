@@ -18,9 +18,9 @@
 -- (gp_ao.c), which is Cloudberry's range in rows.
 --
 -- All rows are on content 1: a is 1 in every one.  What the index answers
--- is asked there, in a session of the segment's own (1U): a segment plans
--- its part of a statement for itself on the planner's route, with its own
--- enable_seqscan, and the answers are to be the index's.
+-- is asked there, in a session of the segment's own (1U): the pages a scan
+-- was given are in the segment's own EXPLAIN ANALYZE, and the summaries in
+-- the index's own pages, which pageinspect reads where they are.
 
 -- The summaries of an index on this node: the range's segment file, its
 -- first block within the file, and what PostgreSQL's page items say of it.
