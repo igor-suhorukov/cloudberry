@@ -785,6 +785,17 @@ double PaxAccessMethod::IndexBuildRangeScan(
   index_info->ii_ExpressionsState = NIL;
   index_info->ii_PredicateState = NULL;
 
+  /*
+   * A snapshot older than the build may still see rows it left out: a row an
+   * UPDATE or a DELETE replaced, which a scan of SnapshotAny passes over, the
+   * micro partitions' visibility maps read with the catalog snapshot.  So
+   * the index is not read by a transaction whose oldest snapshot is older
+   * than it (indcheckxmin), as gp_ao's is not (ao_am.c).  Cloudberry's PAX
+   * says nothing of it, and its test of the case expects the row lost
+   * (pax/snapshot_index_corruption, its FIXME).
+   */
+  index_info->ii_BrokenHotChain = true;
+
   return reltuples;
 }
 

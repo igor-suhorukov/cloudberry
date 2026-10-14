@@ -60,7 +60,9 @@ pax/snapshot_index_corruption
   index scan.  And the row the REPEATABLE READ transaction still sees after
   another transaction updated it and built an index: i = 100, as a heap
   table's index answers, where PAX's expected output has no row -- a
-  difference PAX's own test marks FIXME.
+  difference PAX's own test marks FIXME.  The index's build left the row
+  out and says so (indcheckxmin), and the segment, whose snapshot is older
+  than the index, reads the table.
 
 vacuum_full_interrupt
   EXPLAIN's plan, which the session makes with the planner in either pass:
