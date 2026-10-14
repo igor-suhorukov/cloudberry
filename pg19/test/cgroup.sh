@@ -58,12 +58,16 @@ if [ -f "$cg/cgroup.controllers" ] && [ -w "$cg/cgroup.procs" ] &&
 	if echo "+cpuset +cpu +io +memory +pids" > "$cg/cgroup.subtree_control" 2> /dev/null &&
 	   chmod a+w "$cg/cgroup.procs"; then
 		for pass in planner orca; do
-			for group in $(awk '$1 == "run" && $3 != "*" && !seen[$3]++ { print $3 }' "$here/resgroup/manifest"); do
+			# a parent a group of the resource group suite's manifest, and
+			# single_<group> a group of the one node's
+			# (singlenode_resgroup/manifest)
+			for group in $(awk '$1 == "run" && $3 != "*" && !seen[$3]++ { print $3 }' "$here/resgroup/manifest") \
+			             $(awk '$1 == "run" && $3 != "*" && !seen[$3]++ { print "single_" $3 }' "$here/singlenode_resgroup/manifest"); do
 				parent="gpdb_${pass}_$group"
 				mkdir -p "$cg/$parent" &&
 				echo "+cpuset +cpu +io +memory +pids" > "$cg/$parent/cgroup.subtree_control" 2> /dev/null &&
 				chown -R "$user" "$cg/$parent" ||
-					echo "cgroup.sh: could not set up $cg/$parent; that group of the resgroup suite will skip" >&2
+					echo "cgroup.sh: could not set up $cg/$parent; that group of the resource group tests will skip" >&2
 			done
 		done
 		mkdir -p "$cg/jobs" &&

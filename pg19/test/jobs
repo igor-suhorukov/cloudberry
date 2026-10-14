@@ -26,13 +26,15 @@
 #
 # A suite that runs its tests under the planner and under ORCA is one job a
 # pass, and diskquota's, pax's and resgroup's a job a group of their tests
-# too, resgroup's each on a cgroup parent of its own (resgroup/run.sh).
+# too, resgroup's each on a cgroup parent of its own (resgroup/run.sh), as
+# singlenode_resgroup's are, the same tests on one node.
 # ALONE=1 jobs run after the rest, side by side with each other alone:
 # resgroup's test that measures a group's share of the CPU, each pass on
-# half the cores (CPUS).  The seconds are a run's, on the machine the port is
-# built on (16 cores, 32 threads), with the jobs started as the memory let
-# them, ten at once at most; they order the jobs and nothing else, and
-# run.sh's summary gives each run's own.
+# half the cores (CPUS); and ALONE=2 jobs after those, alone again: the same
+# test on one node, on the same cores.  The seconds are a run's, on the
+# machine the port is built on (16 cores, 32 threads), with the jobs started
+# as the memory let them, ten at once at most; they order the jobs and
+# nothing else, and run.sh's summary gives each run's own.
 #
 # MEM= is the most memory the job holds, in megabytes -- its servers' data,
 # WAL and shared memory, /tmp being a tmpfs -- as run.sh's summary gave it,
@@ -48,6 +50,12 @@ resgroup               orca_cpuset 79 PASSES=orca RG_GROUPS=cpuset MEM=1500
 resgroup               planner_cpuset 77 PASSES=planner RG_GROUPS=cpuset MEM=1500
 resgroup               orca     144   PASSES=orca RG_GROUPS=main MEM=1500
 resgroup               planner  127   PASSES=planner RG_GROUPS=main MEM=1500
+singlenode_resgroup    orca_cpu 100   PASSES=orca RG_GROUPS=cpu ALONE=2 CPUS=16-31 MEM=800
+singlenode_resgroup    planner_cpu 100 PASSES=planner RG_GROUPS=cpu ALONE=2 CPUS=0-15 MEM=800
+singlenode_resgroup    orca_cpuset 65 PASSES=orca RG_GROUPS=cpuset MEM=800
+singlenode_resgroup    planner_cpuset 65 PASSES=planner RG_GROUPS=cpuset MEM=800
+singlenode_resgroup    orca     100   PASSES=orca RG_GROUPS=main MEM=800
+singlenode_resgroup    planner  100   PASSES=planner RG_GROUPS=main MEM=800
 greenplum              orca     136   PASSES=orca MEM=19500
 diskquota              regress  121   DQ_PARTS=regress DQ_GROUP=main MEM=5500
 diskquota              ctas     101   DQ_PARTS=regress DQ_GROUP=ctas MEM=6000

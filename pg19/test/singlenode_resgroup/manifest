@@ -1,0 +1,94 @@
+# Cloudberry's resource group tests on one node, test by test, as the port
+# runs them.
+#
+#   run   the test runs here, in both passes.  A difference reviewed and
+#         kept is one the port's cluster has too, the node answering as it
+#         does: ../resgroup/cloudberry's, and ../resgroup_v1/cloudberry's
+#         for resgroup_memory_limit; none is the node's own.
+#         The third word is the group, as ../resgroup/manifest has them:
+#         each group's tests share a node and a cgroup parent of their own,
+#         and run one at a time, in a job of its own (../jobs, RG_GROUPS).
+#         The group cpu has the test that keeps its cores busy and measures
+#         what a group gets of them, which runs after the other jobs, and
+#         after the cluster's (../jobs); the group cpuset the test that pins
+#         groups to cores 0 and 1 and looks where their processes run; "*"
+#         is every group, resgroup_auxiliary_tools_v2, which turns resource
+#         groups on.
+#   skip  it does not, for the reason given
+#
+# A test whose name begins "port/" is the port's own (sql/port and
+# expected/port here).
+#
+# What the suite stands for is src/test/singlenode_isolation2's
+# isolation2_resgroup_schedule: thirty tests, which nothing of Cloudberry's
+# runs -- no target of its Makefile names the schedule -- and which its
+# server would not take.  The schedule and its files are
+# src/test/isolation2's as they were when the single-node suite was made
+# (efef6de4271), copied whole and not changed since: tests of a group's
+# cpu_rate_limit, memory_limit, memory_shared_quota and memory_spill_ratio,
+# and of cgroup v1's directories, written before Cloudberry's resource
+# groups were given cpu_max_percent, cpu_weight and memory_quota, and cgroup
+# v2.  Hardly a CREATE RESOURCE GROUP of theirs is one Cloudberry's server
+# takes: it does not know the options, "option "cpu_rate_limit" not
+# recognized".  So a test of the thirty runs as it is written today: its
+# file is src/test/isolation2's of the same name, compared with its expected
+# output there, on one node.  Of the thirty,
+#
+#   seventeen are there by their names: the sixteen that are tests of
+#   isolation2_resgroup_v2_schedule, what Cloudberry's cluster runs today on
+#   cgroup v2, and resgroup_memory_limit, the v1 schedule's, which reads no
+#   cgroup;
+#
+#   three are there by another name -- enable_resgroup, which is
+#   resgroup_auxiliary_tools_v2; resgroup_cpu_rate_limit, renamed
+#   resgroup_cpu_max_percent as the option was; and disable_resgroup,
+#   resgroup_disable_resgroup -- and are listed by that one;
+#
+#   one runs as the single-node suite has it, resgroup_bypass_memory_limit,
+#   which no schedule of the cluster's has now: its statements are SETs;
+#
+#   and nine are skipped: tests of what Cloudberry's resource groups have
+#   not had since, each with its reason.
+#
+# And the six tests the v2 schedule has that the thirty do not name run too,
+# so that the schedule is here whole, in its order, the thirty's others at
+# their places in theirs: resgroup_bypass_catalog, resgroup_wait_time,
+# resgroup_memory_limit_resgroup_v2, resgroup_io_limit,
+# resgroup_pg_manage_resource_groups and resgroup_large_group_id.
+skip resgroup/enable_resgroup_validate gpconfig's check of cgroup v1's directories as it sets gp_resource_manager to group -- cpu/gpdb, cpuacct/gpdb and cpuset/gpdb, each there and this user's to write -- which the test takes away one at a time: the hosts' kernels mount no cgroup v1 (../resgroup_v1/run.sh), and no schedule of Cloudberry's has had the test since its resource groups took cgroup v2
+run  resgroup/resgroup_auxiliary_tools_v2  *
+run  resgroup/resgroup_bypass_catalog  main
+run  resgroup/resgroup_views  main
+run  resgroup/resgroup_syntax  main
+run  resgroup/resgroup_transaction  main
+run  resgroup/resgroup_name_convention  main
+run  resgroup/resgroup_bypass  main
+run  resgroup/resgroup_assign_slot_fail  main
+run  resgroup/resgroup_unassign_entrydb  main
+skip resgroup/resgroup_seg_down_2pc a segment that goes down in the second phase of ALTER RESOURCE GROUP's commit, and the mirror that takes its place: one node has neither.  Cloudberry's cluster schedules have the test too, commented out as unstable
+run  resgroup/resgroup_concurrency  main
+run  resgroup/resgroup_wait_time  main
+run  resgroup/resgroup_bypass_memory_limit  main
+run  resgroup/resgroup_alter_concurrency  main
+skip resgroup/resgroup_memory_statistic a group's memory_limit as a share of the host's memory, with its memory_shared_quota, and what pg_resgroup_get_status() says is used of each: the memory model Cloudberry's resource groups had before memory_quota, whose options its server does not know; the test left the cluster's schedule with the model
+run  resgroup/resgroup_memory_limit  main
+skip resgroup/resgroup_memory_runaway the runaway detector on a group's memory_limit and memory_shared_quota, under gp_resource_group_memory_limit: the memory model Cloudberry's resource groups had before memory_quota, of which its server has neither the options nor the setting; the test left the cluster's schedule with the model
+skip resgroup/resgroup_alter_memory ALTER RESOURCE GROUP's memory_limit and memory_shared_quota beside running queries: the memory model Cloudberry's resource groups had before memory_quota, whose options its server does not know; the test left the cluster's schedule with the model
+run  resgroup/resgroup_cpu_max_percent  cpu
+skip resgroup/resgroup_alter_memory_spill_ratio a group's memory_spill_ratio, altered: an option Cloudberry's server does not know, of the memory model its resource groups had before memory_quota; the test left the cluster's schedule with the model
+run  resgroup/resgroup_cpuset  cpuset
+run  resgroup/resgroup_cpuset_empty_default  main
+skip resgroup/resgroup_set_memory_spill_ratio the setting memory_spill_ratio, a session's own over its group's: Cloudberry's server has no such setting, nor the group's option, of the memory model its resource groups had before memory_quota; the test left the cluster's schedule with the model
+skip resgroup/resgroup_unlimit_memory_spill_ratio a group's memory_spill_ratio of 0, which left its operators' memory to statement_mem: an option Cloudberry's server does not know, of the memory model its resource groups had before memory_quota; the test left the cluster's schedule with the model
+run  resgroup/resgroup_cancel_terminate_concurrency  main
+run  resgroup/resgroup_memory_limit_resgroup_v2  main
+run  resgroup/resgroup_move_query  main
+run  resgroup/resgroup_io_limit  main
+run  resgroup/resgroup_recreate  main
+skip resgroup/resgroup_operator_memory the memory a group's memory_spill_ratio gave each operator of a plan: an option Cloudberry's server does not know, of the memory model its resource groups had before memory_quota; the test left the cluster's schedule with the model
+run  resgroup/resgroup_functions  main
+run  resgroup/resgroup_pg_manage_resource_groups  main
+run  resgroup/resgroup_dumpinfo  main
+run  resgroup/resgroup_large_group_id  main
+run  port/resgroup_parallel_worker  main
+run  resgroup/resgroup_disable_resgroup  main

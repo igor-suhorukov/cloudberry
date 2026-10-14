@@ -4,7 +4,8 @@ expected output that have been reviewed, and are the port's for a reason of
 its own, in the form ../../singlenode/canon.pl gives them, kept in the test's
 directory, resgroup/.  A test of the v2 schedule's too that answers alike
 has its difference in ../../resgroup/cloudberry, which ../run.sh reads
-after this directory.
+after this directory.  ../../singlenode_resgroup, one node's suite, reads
+this directory for resgroup_memory_limit, which it runs too.
 
 resgroup_memory_limit
   The command tags of CREATE and DROP RESOURCE GROUP, which the port's

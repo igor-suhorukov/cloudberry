@@ -1046,7 +1046,11 @@ coordinator and three segments under the planner, as Cloudberry's expected
 output has them; `resgroup`, M6's, Cloudberry's resource group schedule
 for cgroup v2, whose tests write the cgroups under a parent of each job's
 own, `/sys/fs/cgroup/gpdb_<pass>_<group>` -- the tests service is
-privileged, and its entrypoint makes them (`test/cgroup.sh`) -- and `memprot`, memory protection's refusals;
+privileged, and its entrypoint makes them (`test/cgroup.sh`) --
+`singlenode_resgroup`, the same schedule on one node, for the schedule of
+resource group tests Cloudberry's single-node suite has and does not run,
+its files being of options its server no longer takes -- and `memprot`,
+memory protection's refusals;
 `gpmgmt`, M7's, gpMgmt's tools on clusters they make on this host --
 gpinitsystem's, a mirror for each primary, and one of primaries alone that
 gpaddmirrors gives mirrors, its nodes authenticating each other by
@@ -1103,5 +1107,6 @@ PostgreSQL's tests ran on, and `diskquota`'s, `pax`'s and `resgroup`'s over
 jobs of their groups.  `resgroup`'s test that measures what a group gets of
 the CPU runs after the rest, alone, each pass on half the cores: beside the
 other jobs, or on fewer cores, the shares it measures missed its bounds.
+`singlenode_resgroup`'s runs after that, alone again, on the same cores.
 `JOBS=1` runs one job at a time, `PASSES=planner` only the planner passes,
 and `RESULTS_DIR` gets a directory for each job.

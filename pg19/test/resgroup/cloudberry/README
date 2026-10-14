@@ -9,6 +9,9 @@ for that pass alone.  ../isolation2/run.sh counts a test as passing when
 gpdiff.pl, under Cloudberry's init_file and init_file_resgroup and the
 port's ../init_file, finds no difference or exactly the file's.
 
+../../singlenode_resgroup, the same schedule on one node, reads this directory
+too: a test that differs here differs alike there.
+
 resgroup_concurrency
   The wait event of a backend that waits for a group's slot.  Cloudberry's
   is of a type of its own, ResourceGroup, and names the group

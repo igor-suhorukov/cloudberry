@@ -37,7 +37,8 @@
 # "jobs" marks ALONE=1 run after all the others, side by side with each
 # other alone: jobs whose tests keep the cores they are given busy and
 # measure what a group of theirs gets of them -- resgroup's, a pass on half
-# the cores each.
+# the cores each.  And those it marks ALONE=2 after those, alone again:
+# singlenode_resgroup's, the same test on one node, on the same cores.
 #
 # RESULTS_DIR, when set, is given to each job as a directory of its own
 # under it, named for the job: isolation2.orca, cluster.
@@ -96,7 +97,7 @@ for s in "${suites[@]}"; do
 			continue
 		fi
 		j_suite+=("$s"); j_name+=("$name"); j_secs+=("$secs"); j_env+=("$env")
-		[[ " $env " == *" ALONE=1 "* ]] && j_alone+=(1) || j_alone+=(0)
+		[[ " $env " =~ \ ALONE=([0-9]+)\  ]] && j_alone+=("${BASH_REMATCH[1]}") || j_alone+=(0)
 	done < <(awk -v s="$s" '$1 == s' "$here/jobs" 2> /dev/null)
 	if [ "$listed" -eq 0 ]; then
 		j_suite+=("$s"); j_name+=(""); j_secs+=(0); j_env+=(""); j_alone+=(0)
@@ -207,15 +208,15 @@ most=0
 while [ "${#pending[@]}" -gt 0 ] || [ "${#running[@]}" -gt 0 ]; do
 	# In order, each job there is room for: one there is not waits, and
 	# those after it that fit start.  The ALONE jobs, last in order, once
-	# nothing else runs.
+	# nothing else runs: those of ALONE=1, and then those of ALONE=2.
 	left=()
 	for i in "${pending[@]}"; do
-		if [ "${j_alone[$i]}" -eq 1 ] && [ "$alone" -eq 0 ]; then
+		if [ "${j_alone[$i]}" -gt "$alone" ]; then
 			if [ "${#running[@]}" -gt 0 ]; then
 				left+=("$i")
 				continue
 			fi
-			alone=1
+			alone="${j_alone[$i]}"
 		fi
 		if [ "${#running[@]}" -ge "$max" ] || ! mem_room "$i"; then
 			left+=("$i")

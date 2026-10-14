@@ -47,13 +47,11 @@
 # the other jobs (../jobs, ALONE): on fewer cores, or beside other jobs, a
 # group's share missed the test's ten points, and the test's own statements,
 # a superuser's in admin_group at a hundredth of the cores, came too late to
-# cancel what they started.  And the helper that finds on which cores a
-# group's processes run reads the parent's processes (cb_ps.py), where
-# Cloudberry's runs ps, which reads every process of the machine, once every
-# 10 ms -- here the processes of every job of a full run, which took minutes.
+# cancel what they started.
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HERE/parent.sh"
 
 # resgroup_io_limit limits a group's I/O on the disk its tablespace is on,
 # which it finds from the mount the directory is on: not the container's
@@ -80,21 +78,11 @@ for group in ${RG_GROUPS:-$all_groups}; do
 	manifest="$(mktemp "${TMPDIR:-/tmp}/cb-resgroup-XXXXXX.manifest")"
 	awk -v g="$group" '$1 != "run" || $3 == g || $3 == "*"' "$HERE/manifest" > "$manifest"
 
-	# Cloudberry's gpdb, as the pass's parent: in a path, a helper's
-	# get_cgroup_prop(), the setting gpconfig is given, and the row SHOW
-	# prints it in, whose width stays the column's; and every core, as a
-	# shell command of a test counts them, as the parent's.
-	cpus="${CPUS:-}"
+	# Cloudberry's gpdb, as the pass's parent, and every core as the job's
+	# own (parent.sh)
 	sed="$(mktemp "${TMPDIR:-/tmp}/cb-resgroup-XXXXXX.sed")"
-	pad=$(printf '%*s' $(( ${#parent} - 4 )) '')
-	{
-		echo "s#/sys/fs/cgroup/gpdb\\b#/sys/fs/cgroup/$parent#g"
-		echo "s#get_cgroup_prop\\('gpdb/#get_cgroup_prop('$parent/#g"
-		echo "s#(cgroup_parent -v )\"gpdb\"#\\1\"$parent\"#g"
-		echo "s#^ gpdb$pad( *)\$# $parent\\1#"
-		[ -n "$cpus" ] && echo "s#0-\\$\\(\\(\\$\\(nproc\\)-1\\)\\)#$cpus#g"
-		echo "s#subprocess\\.check_output\\(\\['ps', '-eF'\\]\\)#(__import__('sys').path.__contains__('$HERE') or __import__('sys').path.insert(0, '$HERE'), __import__('cb_ps'))[1].ps('$parent')#g"
-	} > "$sed"
+	resgroup_parent_sed "$parent" "${CPUS:-}" > "$sed"
+	cpus="${CPUS:-}"
 
 	# As Cloudberry's installcheck-resgroup-v2 runs it: in its own database,
 	# and compared under init_file_resgroup, beside the port's init_file here.

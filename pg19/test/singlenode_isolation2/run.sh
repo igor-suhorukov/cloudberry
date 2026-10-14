@@ -65,6 +65,36 @@ export LD_LIBRARY_PATH="$("$BINDIR/pg_config" --libdir)${LD_LIBRARY_PATH:+:$LD_L
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CB="${CB_ISOLATION2_DIR:-/cb/src/test/singlenode_isolation2}"
 GPDIFF="${GPDIFF_DIR:-/cb/src/test/regress}"
+# Another schedule runs through this harness too, with a manifest of its
+# own: ../singlenode_resgroup's, the resource group tests on one node, as
+# ../resgroup's run through the isolation2 suite's harness on a cluster.
+# What it gives: its name, in what is printed, and what its manifest lists
+# (SN_ISOLATION2_WHAT); the manifest; the directory of its differences kept
+# -- or several, the first first, for a schedule whose tests are another's
+# too -- and the one of its own tests (port/); the directory of Cloudberry's
+# its tests are read from, which run from this suite's as the driver does, a
+# test that directory lacks being this suite's; the database it runs in; the
+# init file of Cloudberry's it is compared under, and init files of its own
+# beside this suite's; the kinds of respelling its tests want
+# (../respell.pl), and rules of sed of its own, applied as the respelling
+# is, to each test and its expected output alike.
+SUITE="${SN_ISOLATION2_SUITE:-singlenode_isolation2}"
+MANIFEST="${SN_ISOLATION2_MANIFEST:-$HERE/manifest}"
+WHAT="Cloudberry's singlenode isolation2 suite, with every M1 module, gp_ao, gp_exttable and gp_resource loaded"
+WHAT="${SN_ISOLATION2_WHAT:-$WHAT}"
+KEPT="${SN_ISOLATION2_KEPT:-$HERE/cloudberry}"
+OWN="${SN_ISOLATION2_OWN:-$HERE}"
+TESTS="${SN_ISOLATION2_TESTS_DIR:-$CB}"
+DBNAME="${SN_ISOLATION2_DBNAME:-isolation2test}"
+CB_INIT="${SN_ISOLATION2_CB_INIT:-$CB/init_file_isolation2}"
+EXTRA_INIT="${SN_ISOLATION2_EXTRA_INIT:-}"
+KINDS="${SN_ISOLATION2_KINDS:-setsys altersys func nameeq header0}"
+EXTRA_SED="${SN_ISOLATION2_EXTRA_SED:-}"
+# ... and the node's superuser, where its tests name one: the isolation2
+# suite's, gpadmin, for tests that are that suite's
+if [ -n "${SN_ISOLATION2_SUPERUSER:-}" ]; then
+	export PGUSER="$SN_ISOLATION2_SUPERUSER"
+fi
 
 if [ ! -f "$CB/sql_isolation_testcase.py" ] || [ ! -f "$GPDIFF/gpdiff.pl" ] ||
    [ ! -f "$GPDIFF/init_file" ] || ! python3 -c 'import pg' 2> /dev/null; then
@@ -96,17 +126,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
-run_tests=$(awk '$1 == "run" { print $2 }' "$HERE/manifest")
+run_tests=$(awk '$1 == "run" { print $2 }' "$MANIFEST")
 
-echo "singlenode_isolation2: Cloudberry's singlenode isolation2 suite, with every M1 module, gp_ao, gp_exttable and gp_resource loaded"
+echo "$SUITE: $WHAT"
 printf '  of the %d tests Cloudberry schedules: %d run here, %d are skipped\n' \
-	"$(grep -cE '^(run|skip) ' "$HERE/manifest")" \
+	"$(grep -cE '^(run|skip) ' "$MANIFEST")" \
 	"$(echo "$run_tests" | wc -w)" \
-	"$(grep -c '^skip ' "$HERE/manifest")"
-awk '$1 == "skip" { $1 = ""; sub(/^ /, ""); print "  skip " $0 }' "$HERE/manifest" | cut -c1-150
+	"$(grep -c '^skip ' "$MANIFEST")"
+awk '$1 == "skip" { $1 = ""; sub(/^ /, ""); print "  skip " $0 }' "$MANIFEST" | cut -c1-150
 echo
 
-"$BINDIR/initdb" -D "$WORK/data" -N --locale=C --encoding=UTF8 > "$WORK/initdb.log" 2>&1 \
+"$BINDIR/initdb" -D "$WORK/data" -N ${SN_ISOLATION2_SUPERUSER:+-U "$SN_ISOLATION2_SUPERUSER"} --locale=C --encoding=UTF8 > "$WORK/initdb.log" 2>&1 \
 	|| { echo "initdb failed"; tail -20 "$WORK/initdb.log"; exit 1; }
 {
 	echo "unix_socket_directories = '$SOCK'"
@@ -132,11 +162,17 @@ for db in template1 postgres; do
 	"$PSQL" -X -q -d "$db" -c "CREATE EXTENSION gp_core" > /dev/null ||
 		{ echo "could not create gp_core in $db"; exit 1; }
 done
+# ... and, for a schedule that asks it, an extension more in postgres: a
+# helper of a resource group test's creates a group there, by psql
+for ext in ${SN_ISOLATION2_POSTGRES_MORE:-}; do
+	"$PSQL" -X -q -d postgres -c "CREATE EXTENSION $ext" > /dev/null ||
+		{ echo "could not create $ext in postgres"; exit 1; }
+done
 
 # The settings the port has, respelled as the isolation2 suite respells them
 # (see there, and ../respell.pl).
 {
-	echo "kinds setsys altersys func nameeq header0"
+	echo "kinds $KINDS"
 	"$PSQL" -X -q -t -A -d postgres -c "SELECT name FROM pg_settings WHERE name LIKE 'gp.%' ORDER BY length(name) DESC" |
 	while read -r name; do
 		short="${name#gp.}"
@@ -163,6 +199,7 @@ done
 	# not found, "could not open file".  The backend stays where it is, as
 	# in the isolation2 suite.
 	echo "sed s/os\\.chdir\\('\\/tmp'\\)/pass/"
+	[ -n "$EXTRA_SED" ] && sed 's/^/sed /' "$EXTRA_SED"
 } > "$WORK/respell"
 respell() { perl "$HERE/../respell.pl" "$WORK/respell" "$@"; }
 export PG_BINDIR="$BINDIR"
@@ -225,9 +262,9 @@ for pass in ${PASSES:-planner orca}; do
 		orca)    optimizer=on ;;
 	esac
 
-	"$PSQL" -X -q -d postgres -c "DROP DATABASE IF EXISTS isolation2test" > /dev/null 2>&1
-	"$PSQL" -X -q -d postgres -c "CREATE DATABASE isolation2test TEMPLATE template0" > /dev/null
-	if ! out=$("$PSQL" -X -q -v ON_ERROR_STOP=1 -d isolation2test -f "$HERE/setup.sql" 2>&1); then
+	"$PSQL" -X -q -d postgres -c "DROP DATABASE IF EXISTS $DBNAME" > /dev/null 2>&1
+	"$PSQL" -X -q -d postgres -c "CREATE DATABASE $DBNAME TEMPLATE template0" > /dev/null
+	if ! out=$("$PSQL" -X -q -v ON_ERROR_STOP=1 -d "$DBNAME" -f "$HERE/setup.sql" 2>&1); then
 		echo "  the setup failed:"; printf '%s\n' "$out" | sed 's/^/    /'
 		failed=$((failed + 1)); continue
 	fi
@@ -240,9 +277,12 @@ for pass in ${PASSES:-planner orca}; do
 			"$(dirname "$R/sql/$t")" "$(dirname "$R/expected/$t")"
 		# A test whose name begins "port/" is the port's own, from sql/port
 		# and expected/port beside this file, as Cloudberry's are from its
-		# suite's.
-		src="$CB"
-		[[ "$t" == port/* ]] && src="$HERE"
+		# suite's -- or, for a schedule whose tests are read from another
+		# directory of Cloudberry's, from that one, a test it lacks being
+		# this suite's.
+		src="$TESTS"
+		[ ! -f "$TESTS/sql/$t.sql" ] && [ ! -f "$TESTS/input/$t.source" ] && src="$CB"
+		[[ "$t" == port/* ]] && src="$OWN"
 		# A test Cloudberry's pg_regress makes twice of one file, where its
 		# directory says so (GENERATE_ROW_AND_COLUMN_FILES): uao/x_row and
 		# uao/x_column of input/uao/x.source, an append-optimized table's
@@ -266,7 +306,7 @@ for pass in ${PASSES:-planner orca}; do
 		t0=$(date +%s%N)
 		( cd "$CB" && PGOPTIONS="-c gp.optimizer=$optimizer" \
 			timeout "${ISOLATION2_TEST_TIMEOUT:-300}" python3 "$EXEC/sql_isolation_testcase.py" \
-				--dbname=isolation2test --initfile_prefix="$res" \
+				--dbname="$DBNAME" --initfile_prefix="$res" \
 				< "$R/sql/$t.sql" > "$res" 2>&1 )
 		ms=$(( ($(date +%s%N) - t0) / 1000000 ))
 
@@ -286,18 +326,24 @@ for pass in ${PASSES:-planner orca}; do
 		else
 			respell "$cbexp" > "$exp"
 		fi
-		inits=(--gpd_init "$GPDIFF/init_file" --gpd_init "$CB/init_file_isolation2"
+		inits=(--gpd_init "$GPDIFF/init_file" --gpd_init "$CB_INIT"
 		       --gpd_init "$HERE/init_file")
+		for init in $EXTRA_INIT; do inits+=(--gpd_init "$init"); done
 		[ -s "$res.ini" ] && inits+=(--gpd_init "$res.ini")
 
 		gpdiff -U0 "${inits[@]}" "$exp" "$res" 2> /dev/null | perl "$HERE/../singlenode/canon.pl" > "$R/canon/$t.diff"
 		# A comparison that could not be made is a difference, never an empty one.
 		st=("${PIPESTATUS[@]}")
 		[ "${st[0]}" -le 1 ] && [ "${st[1]}" -eq 0 ] || echo "no comparison was made" >> "$R/canon/$t.diff"
-		dir="$HERE/cloudberry/$(dirname "$t")"
-		if [ ! -s "$R/canon/$t.diff" ] ||
-		   cmp -s "$R/canon/$t.diff" "$dir/$name.$pass.diff" ||
-		   cmp -s "$R/canon/$t.diff" "$dir/$name.diff"; then
+		kept=0
+		for dir in $KEPT; do
+			dir="$dir/$(dirname "$t")"
+			if cmp -s "$R/canon/$t.diff" "$dir/$name.$pass.diff" ||
+			   cmp -s "$R/canon/$t.diff" "$dir/$name.diff"; then
+				kept=1
+			fi
+		done
+		if [ ! -s "$R/canon/$t.diff" ] || [ "$kept" -eq 1 ]; then
 			rm -f "$R/canon/$t.diff"
 			printf '  ok     %-56s %7s ms\n' "$t" "$ms"
 		else
