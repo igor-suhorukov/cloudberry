@@ -171,6 +171,7 @@
 #include "catalog/pg_class.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_database.h"
+#include "catalog/pg_index.h"
 #include "catalog/pg_type.h"
 #include "commands/tablecmds.h"
 #include "executor/executor.h"
@@ -179,6 +180,8 @@
 #include "libpq-fe.h"
 #include "libpq/libpq-be-fe-helpers.h"
 #include "miscadmin.h"
+#include "nodes/pathnodes.h"
+#include "optimizer/pathnode.h"
 #include "parser/analyze.h"
 #include "port/pg_lfind.h"
 #include "postmaster/bgworker.h"
@@ -2068,6 +2071,7 @@ dtx_lower_xmin(TransactionId xmin)
 static ExecutorStart_hook_type prev_executor_start = NULL;
 static ExecutorRun_hook_type prev_executor_run = NULL;
 static ExecutorEnd_hook_type prev_executor_end = NULL;
+static build_simple_rel_hook_type prev_build_simple_rel = NULL;
 
 /*
  * What a segment's part last showed of a statement it was sent, which
@@ -2246,6 +2250,96 @@ dtx_executor_start(QueryDesc *queryDesc, int eflags)
 		prev_executor_start(queryDesc, eflags);
 	else
 		standard_ExecutorStart(queryDesc, eflags);
+}
+
+/*
+ * The xmin of the snapshot the statement being planned here will read with,
+ * made to agree with the distributed one as dtx_executor_start() makes it,
+ * or this backend's TransactionXmin where that is older: the oldest
+ * transaction the statement may see in progress.  Where nothing is hidden,
+ * TransactionXmin.
+ */
+static TransactionId
+dtx_plan_xmin(void)
+{
+	GpDtxSnapshot *ds;
+	Snapshot	snap;
+	Snapshot	crafted = NULL;
+
+	if (!ActiveSnapshotSet() ||
+		(snap = GetActiveSnapshot())->snapshot_type != SNAPSHOT_MVCC)
+		return TransactionXmin;
+	if (GpClusterIsDispatched() && !GpShareIsReader() &&
+		(ds = dtx_current()) != NULL)
+		crafted = RecoveryInProgress() ? dtx_craft_mirror(snap, ds)
+			: dtx_craft(snap, ds);
+	else if (snap->takenDuringRecovery && GpClusterStandbyDispatch() &&
+			 !IsParallelWorker())
+		crafted = dtx_craft_standby(snap);
+	if (crafted == NULL || !TransactionIdPrecedes(crafted->xmin, TransactionXmin))
+		return TransactionXmin;
+	return crafted->xmin;
+}
+
+/*
+ * An index whose pg_index row says indcheckxmin may lack row versions that a
+ * snapshot older than the index's own transaction still sees -- the ones its
+ * build left out as dead to every snapshot then, as gp_ao's and PAX's builds
+ * leave out a row an UPDATE or a DELETE replaced -- and PostgreSQL's planner
+ * passes such an index over for a transaction whose oldest snapshot is that
+ * old (get_relation_info(), README.HOT).  It asks this backend's
+ * TransactionXmin, which here is the local snapshot's: the executor reads
+ * with one made to agree with the distributed snapshot, which hides the
+ * transactions that snapshot sees in progress and is older by them
+ * (dtx_executor_start()).  A segment's first statement of a REPEATABLE READ
+ * transaction begun before an UPDATE and the index built after it has a
+ * local snapshot newer than the index, and read through the index lost the
+ * row the UPDATE replaced (isolation2's uao/snapshot_index_corruption).  So
+ * such an index is passed over here as well where the snapshot the
+ * statement will read with is older than it, and the plan marked transient,
+ * as PostgreSQL marks it; where nothing is hidden the snapshot's xmin is
+ * TransactionXmin, and this passes over nothing PostgreSQL kept.
+ */
+static void
+dtx_build_simple_rel(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
+{
+	TransactionId xmin = InvalidTransactionId;
+	List	   *kept = NIL;
+	bool		passed = false;
+
+	if (prev_build_simple_rel)
+		prev_build_simple_rel(root, rel, rte);
+	if (rel->indexlist == NIL ||
+		!(GpClusterIsDispatched() || GpClusterStandbyDispatch()))
+		return;
+
+	foreach_node(IndexOptInfo, info, rel->indexlist)
+	{
+		HeapTuple	tup = SearchSysCache1(INDEXRELID,
+										  ObjectIdGetDatum(info->indexoid));
+		bool		pass = false;
+
+		if (HeapTupleIsValid(tup))
+		{
+			if (((Form_pg_index) GETSTRUCT(tup))->indcheckxmin)
+			{
+				if (!TransactionIdIsValid(xmin))
+					xmin = dtx_plan_xmin();
+				pass = !TransactionIdPrecedes(HeapTupleHeaderGetXmin(tup->t_data),
+											  xmin);
+			}
+			ReleaseSysCache(tup);
+		}
+		if (pass)
+			passed = true;
+		else
+			kept = lappend(kept, info);
+	}
+	if (passed)
+	{
+		rel->indexlist = kept;
+		root->glob->transientPlan = true;
+	}
 }
 
 /* A writer's transaction ID, reported as each executor run ends (above). */
@@ -4777,6 +4871,8 @@ GpDtxInit(void)
 	ExecutorRun_hook = dtx_executor_run;
 	prev_executor_end = ExecutorEnd_hook;
 	ExecutorEnd_hook = dtx_executor_end;
+	prev_build_simple_rel = build_simple_rel_hook;
+	build_simple_rel_hook = dtx_build_simple_rel;
 	prev_ProcessUtility = ProcessUtility_hook;
 	ProcessUtility_hook = dtx_ProcessUtility;
 	prev_object_access = object_access_hook;
