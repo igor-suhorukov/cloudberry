@@ -44,3 +44,8 @@ mkdir -p "$1/bin"
 cp "$(dirname "${BASH_SOURCE[0]}")/ssh" "$1/bin/ssh"
 chmod +x "$1/bin/ssh"
 export PATH="$1/bin:$PATH" USER="${USER:-$(id -un)}"
+# The tools' log directory, there before any of them starts.  Each makes it
+# where it finds none, looking first and making it after (gplog.py), so of
+# two started at once in a home that has none -- the first gpconfig of two
+# jobs of a run -- the second to make it fails, and its test with it.
+mkdir -p ~/gpAdminLogs 2> /dev/null || :
