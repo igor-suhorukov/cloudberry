@@ -1839,6 +1839,49 @@ GpClusterNodes(const GpSegmentConfig **nodes)
 	return cluster_nnodes;
 }
 
+/*
+ * Every node of the cluster as FTS last published them, for another module
+ * (GpCoreApi.cluster_nodes, 1.16): up to "max" into "out"; how many there
+ * are.  The places where no node is are left out.
+ */
+int
+GpClusterNodesForApi(GpCoreNode *out, int max)
+{
+	const GpSegmentConfig *nodes;
+	GpClusterNodeState *states;
+	int			n = GpClusterNodes(&nodes);
+	int			count = 0;
+
+	if (n == 0)
+		return 0;
+	states = palloc_array(GpClusterNodeState, n);
+	(void) GpClusterLiveStates(states);
+	for (int i = 0; i < n; i++)
+	{
+		const GpSegmentConfig *node = &nodes[i];
+		bool		live = states[i].dbid == node->dbid;
+
+		if (node->dbid == 0)
+			continue;
+		if (count < max)
+		{
+			GpCoreNode *o = &out[count];
+
+			o->dbid = node->dbid;
+			o->content = node->content;
+			o->role = live ? states[i].role : node->role;
+			o->preferred_role = node->preferred_role;
+			o->mode = live ? states[i].mode : node->mode;
+			o->status = live ? states[i].status : node->status;
+			o->hostname = node->hostname;
+			o->port = node->port;
+		}
+		count++;
+	}
+	pfree(states);
+	return count;
+}
+
 bool
 GpClusterHasMirrors(void)
 {

@@ -34,6 +34,11 @@
  *   - gp_enable_predicate_pushdown is the port's gp.enable_predicate_pushdown;
  *   - the catalog snapshot a scan of SnapshotAny reads the aux table with is
  *     registered while the scan runs, as PostgreSQL 19 checks.
+ *
+ * From the port: FilterStatistics(), the files and the groups the scan's
+ * sparse filter passed over by their statistics, of those it examined, for
+ * pg_otel_probe's reporter of PAX's scans (PaxScanFilterStatistics(),
+ * modules/pax/pax.c).
  *-------------------------------------------------------------------------
  */
 
@@ -359,6 +364,16 @@ void PaxScanDesc::OpenReader() {
       std::make_unique<TableReader>(std::move(iter), reader_options);
 
   MemoryContextSwitchTo(old_ctx);
+}
+
+bool PaxScanDesc::FilterStatistics(int64 counts[4]) const {
+  const PaxSparseFilter *sparse =
+      filter_ ? filter_->GetSparseFilter() : nullptr;
+
+  if (!sparse) return false;
+  sparse->Statistics(PaxSparseFilter::kFile, &counts[0], &counts[1]);
+  sparse->Statistics(PaxSparseFilter::kGroup, &counts[2], &counts[3]);
+  return true;
 }
 
 PaxScanDesc::~PaxScanDesc() {}

@@ -483,6 +483,18 @@ extern void ao_vacuum_recycle_rel(Oid relid);
 /* ------------------------------------------------------------------------- */
 
 /*
+ * What a scan read over its life, rescans too, for a module's figures of the
+ * scan (ao_report(), pg_otel_probe_api.h): blocks, and their bytes as stored
+ * and as decoded -- decompressed.
+ */
+typedef struct AoReadTotals
+{
+	uint64		blocks;
+	uint64		stored;
+	uint64		raw;
+} AoReadTotals;
+
+/*
  * A reader of one file's blocks: the block it read last, decompressed, and
  * what ao_reader_load() parses out of it -- where each row's MinimalTuple
  * is, for a table by row; a column's values, for a table by column.
@@ -492,6 +504,7 @@ typedef struct AoBlockReader
 	MemoryContext cxt;			/* what its buffers are allocated in */
 	uint32		filenum;
 	uint64	   *bytes_read;		/* where a scan counts what it read, or NULL */
+	AoReadTotals *totals;		/* and its totals, or NULL */
 	bool		loaded;
 	uint32		loaded_filenum;	/* of the loaded block */
 	uint64		offset;			/* of the loaded block */
@@ -565,6 +578,8 @@ typedef struct AoScanDescData
 	int64		range_end;
 	/* the bytes of its files' blocks read so far, for an index build's progress */
 	uint64		bytes_read;
+	/* and over its life, rescans too (AoReadTotals) */
+	AoReadTotals totals;
 	/* TABLESAMPLE: a row is a block, numbered as the scan reaches it */
 	int64		sample_total;	/* rows the segment files hold; -1 unknown */
 	int64		sample_next;	/* the number of the row the scan reads next */

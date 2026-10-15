@@ -79,6 +79,13 @@
 #define GP_SHARE_SLICES				"gp_share_slices"
 
 /*
+ * The slice a fragment a segment's process runs is, for another module
+ * (GpCoreApi.slice_info, 1.16); false where "stmt" is no fragment.
+ */
+struct GpCoreSliceInfo;
+extern bool GpMotionSliceInfo(PlannedStmt *stmt, struct GpCoreSliceInfo *info);
+
+/*
  * Can ORCA's plans with a Motion be carried out from this backend?  The
  * coordinator, with a cluster secret, in a database gp_core is installed in.
  */

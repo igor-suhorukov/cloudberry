@@ -139,6 +139,7 @@
 #include "gp_scan.h"
 #include "gp_segment.h"
 #include "gp_settings.h"
+#include "pg_otel_probe_api.h"
 
 /* What starting a gather costs before its first row: a round trip per segment. */
 #define GATHER_STARTUP_COST		1000.0
@@ -4095,6 +4096,33 @@ GpGatherScanSlice(PlanState *ps, int *slice, int *nsegs)
 	return true;
 }
 
+/*
+ * The planner's route's gather in pg_otel_probe's span of it (its PLAN.md
+ * §4.7.4, pg_otel_probe_api.h): the slice it was, as the executor met it,
+ * the segments it asked -- a direct dispatch's, or the table's -- and what
+ * it sent with its SQL: conditions, a LIMIT, a runtime filter.  It reads the
+ * node's fields alone, and so is safe on a failed statement's error path.
+ */
+static void
+gather_report(PlanState *ps, PgOtelProbeAttrs *attrs, int when)
+{
+	GatherScanState *state = (GatherScanState *) ps;
+
+	if (state->slice > 0)
+		attrs->add_int(attrs, "cloudberry.motion.slice", state->slice);
+	attrs->add_string(attrs, "cloudberry.motion.type", "gather");
+	attrs->add_string(attrs, "cloudberry.motion.transport", "libpq");
+	attrs->add_int(attrs, "cloudberry.gather.segments",
+				   state->ncontents > 0 ? state->ncontents : state->nsegments);
+	attrs->add_bool(attrs, "cloudberry.gather.direct_dispatch", state->ncontents > 0);
+	attrs->add_bool(attrs, "cloudberry.gather.conditions_sent",
+					state->where != NULL && state->where[0] != '\0');
+	if (state->limit != NULL && state->limit[0] != '\0')
+		attrs->add_bool(attrs, "cloudberry.gather.limit_sent", true);
+	if (state->rtf_sent != NULL)
+		attrs->add_bool(attrs, "cloudberry.gather.runtime_filter_sent", true);
+}
+
 void
 GpScanInit(void)
 {
@@ -4102,6 +4130,9 @@ GpScanInit(void)
 		return;
 
 	RegisterCustomScanMethods(&gather_scan_methods);
+	/* pg_otel_probe's spans of a gather, where it is loaded (§4.7.4) */
+	pg_otel_probe_register_node_reporter(&gather_exec_methods, gather_report,
+										 PG_OTEL_PROBE_ABORT_SAFE);
 
 	prev_set_rel_pathlist = set_rel_pathlist_hook;
 	set_rel_pathlist_hook = gp_set_rel_pathlist;

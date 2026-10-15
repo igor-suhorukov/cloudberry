@@ -65,6 +65,10 @@
  *   - the module's magic block and _PG_init are modules/pax/pax.c's, which
  *     calls pax_init() here.
  *
+ * From the port: PaxScanFilterStatistics(), a scan's sparse filter's counts
+ * for pg_otel_probe's reporter of PAX's scans (modules/pax/pax.c), with no
+ * C++ exception crossing into C.
+ *
  *-------------------------------------------------------------------------
  */
 
@@ -888,6 +892,19 @@ static const TableAmExtRoutine kPaxExtMethods = {
 };
 
 const TableAmRoutine *PaxTableAmRoutine(void) { return &kPaxColumnMethods; }
+
+// A scan's sparse filter's counts, for pg_otel_probe's reporter of PAX's
+// scans (pax.c): read only, and no exception crosses into C.
+bool PaxScanFilterStatistics(TableScanDesc scan, int64 *counts) {
+  if (scan == nullptr || scan->rs_rd == nullptr ||
+      scan->rs_rd->rd_tableam != &kPaxColumnMethods)
+    return false;
+  try {
+    return pax::PaxScanDesc::ToDesc(scan)->FilterStatistics(counts);
+  } catch (...) {
+    return false;
+  }
+}
 
 PG_FUNCTION_INFO_V1(pax_tableam_handler);
 Datum pax_tableam_handler(PG_FUNCTION_ARGS) {  // NOLINT

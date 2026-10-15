@@ -152,6 +152,7 @@
 #include "cb_explain.h"
 #include "gp_cluster.h"
 #include "gp_core_api.h"
+#include "gp_counters.h"
 #include "gp_dispatch.h"
 #include "gp_dtx.h"
 #include "gp_endpoint.h"
@@ -169,6 +170,7 @@
 #include "gp_seq.h"
 #include "gp_settings.h"
 #include "gp_share.h"
+#include "pg_otel_probe_api.h"
 
 /*
  * custom_private, in order: the segment it reads from (-1 every one), the
@@ -238,6 +240,14 @@ static int	gp_interconnect_type = GP_INTERCONNECT_TCP;
 
 /* The slice table ORCA's translator keeps in the plan; see compat/cb_motion.h. */
 #define GP_SLICE_TABLE	"gp_slice_table"
+
+/*
+ * On every fragment's PlannedStmt: (slice, parent), the slice it is and the
+ * slice that receives its rows -- 0, the coordinator's, for a Gather's or a
+ * write's -- for a module that follows a statement's slices
+ * (GpMotionSliceInfo(), GpCoreApi.slice_info, 1.16).
+ */
+#define GP_SLICE_MARK	"gp_slice"
 
 /*
  * On a fragment's PlannedStmt: the values of the parameters it reads that
@@ -355,6 +365,20 @@ typedef struct MotionState
 	bool		written;
 	Tuplestorestate *returned;
 	TupleTableSlot *returnedslot;
+
+	/*
+	 * What it moved in this process, for a module's figures of the node
+	 * (motion_report()): rows and their bytes sent through the
+	 * interconnect, a Broadcast's row once for each receiver, and received
+	 * -- through it, from the coordinator's relay, or by the coordinator's
+	 * gather.
+	 */
+	uint64		sent_rows;
+	uint64		sent_bytes;
+	uint64		recv_rows;
+	uint64		recv_bytes;
+	/* its transport's name, kept: the stream is freed as the statement ends */
+	const char *transport_name;
 } MotionState;
 
 static Node *motion_create_state(CustomScan *cscan);
@@ -1140,6 +1164,7 @@ motion_read(MotionState *state, void *ptr, size_t len, bool eof_ok)
 {
 	size_t		got = BufFileReadMaybeEOF(state->file, ptr, len, eof_ok);
 
+	state->recv_bytes += got;
 	if (got == 0 && eof_ok)
 		return false;
 	if (got != len)
@@ -1191,6 +1216,7 @@ motion_recv_next(MotionState *state)
 
 	if (!motion_read(state, &natts, sizeof(natts), true))
 		return ExecClearTuple(slot);
+	state->recv_rows++;
 	natts = pg_ntoh16(natts);
 	if (natts != tupdesc->natts)
 		ereport(ERROR,
@@ -1347,6 +1373,53 @@ stream_from_mark(PlannedStmt *stmt)
 		stream->self = GpMotionSlice(stmt->planTree);
 	MemoryContextSwitchTo(oldcxt);
 	return stream;
+}
+
+/*
+ * What a fragment a segment's process runs is in its statement, for another
+ * module (GpCoreApi.slice_info, 1.16): its slice, as its mark says; the
+ * slice that receives its rows; whether the process is the writer, which
+ * runs a Gather's or a write's fragment, or a reader, whose fragment is the
+ * Motion it sends through; and of the processes that receive its rows, its
+ * own -- the one on this segment where the receiving slice runs here, else
+ * the first -- or -1 for the coordinator.  A relayed slice's rows reach its
+ * receivers through the coordinator, but are received on the segments: it
+ * counts this one's.
+ */
+bool
+GpMotionSliceInfo(PlannedStmt *stmt, GpCoreSliceInfo *info)
+{
+	List	   *mark;
+	List	   *streammark;
+	int			self = GpClusterContentId();
+
+	if (stmt == NULL || (mark = (List *) fragment_mark(stmt, GP_SLICE_MARK)) == NULL)
+		return false;
+	info->slice = intVal(linitial(mark));
+	info->parent = intVal(lsecond(mark));
+	info->gang = GP_GANG_WRITER;
+	info->receiver = info->parent == 0 ? -1 : self;
+
+	streammark = (List *) fragment_mark(stmt, GP_STREAM_MARK);
+	if (streammark == NULL)
+		return true;
+	foreach_node(List, entry, (List *) lsecond(streammark))
+	{
+		List	   *receivers = (List *) list_nth(entry, 4);
+		bool		here = false;
+
+		if (intVal(linitial(entry)) != info->slice)
+			continue;
+		info->parent = intVal(lsecond(entry));
+		foreach_node(Integer, c, receivers)
+			if (intVal(c) == self)
+				here = true;
+		info->receiver = here || receivers == NIL ? self : intVal(linitial(receivers));
+		if (GpMotionIs(stmt->planTree) && GpMotionSlice(stmt->planTree) == info->slice)
+			info->gang = GP_GANG_READER;
+		break;
+	}
+	return true;
 }
 
 /*
@@ -1515,11 +1588,24 @@ motion_send_all(MotionState *state)
 	Datum	   *keyvalues = palloc_array(Datum, Max(nkeys, 1));
 	bool	   *keynulls = palloc_array(bool, Max(nkeys, 1));
 	int			next = (int) (pg_prng_uint32(&pg_global_prng_state) % nsegs);
+	int			copies = 1;
 	StringInfoData row;
 	GpIcSender *sender;
 
 	initStringInfo(&row);
 	sender = GpIcSendBegin(state->icstream, state->slice);
+
+	/*
+	 * A row sent to every receiver, a Broadcast's, counts once for each of
+	 * them, as each receives it (motion_report()).
+	 */
+	if (state->type == GP_MOTION_BROADCAST || state->type == GP_MOTION_GATHER)
+	{
+		GpIcSlice  *s = GpIcStreamSlice(state->icstream, state->slice);
+
+		if (s != NULL && s->nreceivers > 1)
+			copies = s->nreceivers;
+	}
 
 	/* Until the rows end, or no receiver wants more: a LIMIT above them. */
 	while (GpIcSendWanted(sender))
@@ -1586,9 +1672,17 @@ motion_send_all(MotionState *state)
 		/* a Gather's receivers are the one process it gathers to */
 		if (state->type == GP_MOTION_BROADCAST ||
 			state->type == GP_MOTION_GATHER)
+		{
 			GpIcSend(sender, -1, row.data, row.len);
+			state->sent_rows += copies;
+			state->sent_bytes += (uint64) row.len * copies;
+		}
 		else if (state->receiver_of[target] >= 0)
+		{
 			GpIcSend(sender, state->receiver_of[target], row.data, row.len);
+			state->sent_rows++;
+			state->sent_bytes += row.len;
+		}
 
 		/*
 		 * A row for a segment that runs no receiver is one the plan does not
@@ -1725,6 +1819,8 @@ motion_stream_next(MotionState *state)
 	{
 		TupleTableSlot *row = motion_decode_row(state, data, len);
 
+		state->recv_rows++;
+		state->recv_bytes += len;
 		if (state->spool != NULL)
 			tuplestore_puttupleslot(state->spool, row);
 		return row;
@@ -1749,6 +1845,8 @@ stream_merge_read(MotionState *state, int k)
 		ExecClearTuple(state->segslots[k]);
 		return false;
 	}
+	state->recv_rows++;
+	state->recv_bytes += len;
 	ExecCopySlot(state->segslots[k], motion_decode_row(state, data, len));
 	ResetExprContext(state->css.ss.ps.ps_ExprContext);
 	return true;
@@ -2303,6 +2401,8 @@ motion_begin(CustomScanState *node, EState *estate, int eflags)
 		}
 
 		/* A reader's fragment is the Motion it sends through. */
+		if (entry != NULL)
+			state->transport_name = stream->transport->name;
 		if (entry != NULL &&
 			estate->es_plannedstmt->planTree == (Plan *) cscan)
 		{
@@ -2614,6 +2714,20 @@ fragment_sql_ex(EState *estate, Plan *fragment, CustomScan *motion,
 		frag->rowMarks = whole->rowMarks;
 	frag->extension_state = list_copy(marks);
 	frag->utilityStmt = NULL;
+
+	/* which slice it is, and which receives it */
+	{
+		int			type = GpMotionType((Plan *) motion);
+		int			parent = (type == GP_MOTION_GATHER || type == GP_MOTION_DML) && !reader
+			? 0 : GpMotionParent((Plan *) motion);
+
+		frag->extension_state =
+			lappend(frag->extension_state,
+					makeDefElem(pstrdup(GP_SLICE_MARK),
+								(Node *) list_make2(makeInteger(GpMotionSlice((Plan *) motion)),
+													makeInteger(parent < 0 ? -1 : parent)),
+								-1));
+	}
 
 	/* an explained statement's: what the segment measures it with */
 	{
@@ -3504,6 +3618,8 @@ stream_start(MotionState *state, GpStream *stream,
 
 		/* Cloudberry's faults before and after a slice is sent (gp_dispatch.c) */
 		(void) GP_FAULT("before_one_slice_dispatched");
+		/* the slice counts once, whatever the number of its segments */
+		GpCountDispatch();
 		for (int i = 0; i < ss->ncontents; i++)
 		{
 			int			seg = ss->contents[i];
@@ -3852,6 +3968,8 @@ merge_read(MotionState *state, int seg)
 
 	oldcxt = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
 	got = GpGatherNextFrom(state->gather, seg, state->receive);
+	if (got)
+		state->recv_rows++;
 	MemoryContextSwitchTo(oldcxt);
 
 	if (got)
@@ -3970,6 +4088,8 @@ motion_next(ScanState *ss)
 	/* The row's values live until ExecScan resets the per-tuple context. */
 	oldcxt = MemoryContextSwitchTo(ss->ps.ps_ExprContext->ecxt_per_tuple_memory);
 	got = GpGatherNext(state->gather, slot, NULL);
+	if (got)
+		state->recv_rows++;
 	MemoryContextSwitchTo(oldcxt);
 
 	if (got)
@@ -5487,6 +5607,8 @@ GpEndpointDispatch(QueryDesc *queryDesc, CustomScan *gather,
 	fragment = fragment_sql_ex(estate, outerPlan(gather), gather,
 							   state->css.ss.ps.ps_ExprContext, state->key,
 							   marks, true);
+	/* the endpoints' fragment counts once, as a gather's statement does */
+	GpCountDispatch();
 	for (int i = 0; i < nendpoints; i++)
 		GpStreamContinueReader(stream, readers[i],
 							   psprintf("%s; COMMIT%s", fragment,
@@ -5569,6 +5691,87 @@ interconnect_type_check(int *newval, void **extra, GucSource source)
 	return false;
 }
 
+/* ------------------------------------------------------------------------- */
+/* What a tracer's span of a Motion carries                                  */
+/* ------------------------------------------------------------------------- */
+
+static const char *
+motion_kind(int type)
+{
+	switch (type)
+	{
+		case GP_MOTION_GATHER:
+			return "gather";
+		case GP_MOTION_HASH:
+			return "redistribute";
+		case GP_MOTION_BROADCAST:
+			return "broadcast";
+		case GP_MOTION_RANDOM:
+			return "random";
+		case GP_MOTION_DML:
+			return "dml";
+		case GP_MOTION_EXPLICIT:
+			return "explicit";
+		default:
+			return "unknown";
+	}
+}
+
+/*
+ * A Motion node's figures in pg_otel_probe's span of it (its PLAN.md
+ * §4.7.4, pg_otel_probe_api.h): which Motion it is -- its kind and the
+ * slice it sends -- which side of it this process is, the transport its
+ * rows went through, and what it moved here: rows and bytes sent to its
+ * receivers -- a Broadcast's row once for each, as each receives it -- and
+ * received from its senders.  Each segment's process reports its own side,
+ * so the spans of a slice's senders and of its receivers add up to the
+ * same rows and bytes, unless a receiver stopped early.  It reads the
+ * node's fields alone, and so is safe on a failed statement's error path.
+ */
+static void
+motion_report(PlanState *ps, PgOtelProbeAttrs *attrs, int when)
+{
+	MotionState *state = (MotionState *) ps;
+	Plan	   *plan = ps->plan;
+	const char *side;
+	const char *transport = NULL;
+
+	attrs->add_string(attrs, "cloudberry.motion.type", motion_kind(GpMotionType(plan)));
+	attrs->add_int(attrs, "cloudberry.motion.slice", GpMotionSlice(plan));
+	if (state->sending)
+		side = "send";
+	else if (state->type == GP_MOTION_DML)
+		side = "write";
+	else if (state->streamed || state->receiving)
+		side = "receive";
+	else
+		side = "gather";
+	attrs->add_string(attrs, "cloudberry.motion.side", side);
+	if (state->transport_name != NULL)
+		transport = state->transport_name;
+	else if (state->receiving)
+		transport = "relay";
+	else if (!state->sending)
+		transport = "libpq";
+	if (transport != NULL)
+		attrs->add_string(attrs, "cloudberry.motion.transport", transport);
+	if (state->sending)
+	{
+		attrs->add_int(attrs, "cloudberry.motion.rows_sent", (int64) state->sent_rows);
+		attrs->add_int(attrs, "cloudberry.motion.bytes_sent", (int64) state->sent_bytes);
+	}
+	else
+	{
+		attrs->add_int(attrs, "cloudberry.motion.rows_received", (int64) state->recv_rows);
+		if (state->recv_bytes > 0)
+			attrs->add_int(attrs, "cloudberry.motion.bytes_received", (int64) state->recv_bytes);
+	}
+	if (state->streamed)
+		attrs->add_int(attrs, "cloudberry.motion.senders", state->nsenders);
+	if (state->squelched)
+		attrs->add_bool(attrs, "cloudberry.motion.squelched", true);
+}
+
 void
 GpMotionInit(void)
 {
@@ -5602,6 +5805,10 @@ GpMotionInit(void)
 		return;
 
 	RegisterCustomScanMethods(&motion_scan_methods);
+
+	/* pg_otel_probe's spans of a Motion, where it is loaded (§4.7.4) */
+	pg_otel_probe_register_node_reporter(&motion_exec_methods, motion_report,
+										 PG_OTEL_PROBE_ABORT_SAFE);
 	RegisterCustomScanMethods(&hash_filter_scan_methods);
 	GpSplitInit();
 

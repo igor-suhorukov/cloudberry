@@ -36,6 +36,11 @@
  *     registered while the scan runs, as PostgreSQL 19 checks;
  *   - an index fetch's descriptor may be kept between the fetches of one
  *     query, a row fetched by its TID (Rebind()).
+ *
+ * From the port: FilterStatistics(), the files and the groups the scan's
+ * sparse filter passed over by their statistics, of those it examined, for
+ * pg_otel_probe's reporter of PAX's scans (PaxScanFilterStatistics(),
+ * modules/pax/pax.c).
  *-------------------------------------------------------------------------
  */
 
@@ -122,6 +127,10 @@ class PaxScanDesc {
   }
 
   inline Relation GetRelation() { return rs_base_.rs_rd; }
+
+  // what the scan's sparse filter passed over by statistics, of the files
+  // and groups it examined (PaxScanFilterStatistics()); false without one
+  bool FilterStatistics(int64 counts[4]) const;
 
  private:
   // the reader, made as the scan first reads

@@ -61,6 +61,7 @@
 #include "cb_module.h"
 #include "gp_core_api.h"
 #include "pax_module.h"
+#include "pg_otel_probe_api.h"
 #include "vexec_sink.h"
 #include "vexec_source.h"
 
@@ -176,6 +177,31 @@ pax_analyze_sample_rows(Relation relation, AnalyzeSampleRowsFunc *func,
 	return true;
 }
 
+/*
+ * A scan of a PAX table in pg_otel_probe's span of it (its PLAN.md §4.7.4,
+ * pg_otel_probe_api.h): the files and the groups its sparse filter passed
+ * over by their statistics -- min/max and bloom filters -- of those it
+ * examined.  A Seq Scan's; a vector scan reads PAX through vexec's batch
+ * source.  It reads counters, and so is safe on a failed statement's error
+ * path.
+ */
+static void
+pax_report(PlanState *ps, PgOtelProbeAttrs *attrs, int when)
+{
+	TableScanDesc scan;
+	int64		counts[4];
+
+	if (!IsA(ps, SeqScanState))
+		return;
+	scan = ((ScanState *) ps)->ss_currentScanDesc;
+	if (!PaxScanFilterStatistics(scan, counts))
+		return;
+	attrs->add_int(attrs, "pax.files_skipped", counts[0]);
+	attrs->add_int(attrs, "pax.files_examined", counts[1]);
+	attrs->add_int(attrs, "pax.groups_skipped", counts[2]);
+	attrs->add_int(attrs, "pax.groups_examined", counts[3]);
+}
+
 void
 _PG_init(void)
 {
@@ -222,4 +248,8 @@ _PG_init(void)
 	 * (pg_vector_executor.md §3.16), in the same way.
 	 */
 	vexec_register_sink(PaxVexecSink());
+
+	/* pg_otel_probe's spans of its scans, where it is loaded (§4.7.4) */
+	pg_otel_probe_register_scan_reporter(PaxTableAmRoutine(), pax_report,
+										 PG_OTEL_PROBE_ABORT_SAFE);
 }

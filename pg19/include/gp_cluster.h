@@ -109,6 +109,10 @@ extern const GpSegmentConfig *GpClusterSegmentByContent(int content);
  */
 extern int	GpClusterNodes(const GpSegmentConfig **nodes);
 
+/* Every node, for another module (GpCoreApi.cluster_nodes, 1.16). */
+struct GpCoreNode;
+extern int	GpClusterNodesForApi(struct GpCoreNode *out, int max);
+
 /* Does any segment have a mirror? */
 extern bool GpClusterHasMirrors(void);
 

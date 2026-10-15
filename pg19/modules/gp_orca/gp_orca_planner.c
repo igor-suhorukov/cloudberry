@@ -65,6 +65,7 @@
 #include "nodes/value.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/planner.h"
+#include "portability/instr_time.h"
 #include "storage/dsm_registry.h"
 #include "utils/guc.h"
 
@@ -77,6 +78,7 @@
 #include "gp_orca_postgis.h"
 #include "gp_orca_vector.h"
 #include "optimizer/orca.h"
+#include "pg_otel_probe_api.h"
 
 /* gp.optimizer, and gp.optimizer_trace_fallback. */
 bool		gp_optimizer = true;
@@ -127,6 +129,34 @@ static explain_per_plan_hook_type prev_explain_per_plan_hook = NULL;
  * it, which PostgreSQL 19 does not.
  */
 #define GP_ORCA_PLAN_MARK	"gp_orca"
+
+/*
+ * Beside it, for a module that reports a statement's figures (pg_otel_probe,
+ * pg_otel_probe_api.h): how long ORCA took, in microseconds, on a plan it
+ * made; and on one the planner made in its place, as (name, us), why -- the
+ * fallback reason gp_orca.fallbacks() counts, whether ORCA declined, failed
+ * or was not asked (gp.optimizer off, a utility statement) -- and how long
+ * ORCA looked, 0 where it was not asked.  Not on a statement planned inside
+ * ORCA's own planning, nor where this node is not the dispatcher.
+ */
+#define GP_ORCA_TIME_MARK		"gp_orca_time"
+#define GP_ORCA_FALLBACK_MARK	"gp_orca_fallback"
+
+/* A DefElem of a plan's extension_state, by name, or NULL. */
+static Node *
+plan_mark(PlannedStmt *plannedstmt, const char *name)
+{
+	ListCell   *lc;
+
+	foreach(lc, plannedstmt->extension_state)
+	{
+		DefElem    *def = lfirst_node(DefElem, lc);
+
+		if (strcmp(def->defname, name) == 0)
+			return def->arg;
+	}
+	return NULL;
+}
 
 static bool
 planned_by_orca(PlannedStmt *plannedstmt)
@@ -333,6 +363,11 @@ gp_orca_planner(Query *parse, const char *query_string, int cursorOptions,
 	GpFallbackReason reason = GP_FALLBACK_declined;
 	GpOrcaFailure failure = {false, false, NULL};
 	const GpCoreApi *core = cb_core_api();
+	instr_time	started;
+	instr_time	took;
+	bool		tried = false;
+
+	INSTR_TIME_SET_ZERO(took);
 
 	/* The statement as gp_core has PostgreSQL's planner plan it. */
 	if (core != NULL && core->version_minor >= 8 && core->prepare_query != NULL)
@@ -365,6 +400,8 @@ gp_orca_planner(Query *parse, const char *query_string, int cursorOptions,
 		if (vector_options.settings != NIL)
 			nestlevel = vector_settings_set(vector_options.settings);
 		orca_depth++;
+		tried = true;
+		INSTR_TIME_SET_CURRENT(started);
 		PG_TRY();
 		{
 			result = optimize_query(parse, cursorOptions, boundParams, &options,
@@ -375,6 +412,8 @@ gp_orca_planner(Query *parse, const char *query_string, int cursorOptions,
 			orca_depth--;
 		}
 		PG_END_TRY();
+		INSTR_TIME_SET_CURRENT(took);
+		INSTR_TIME_SUBTRACT(took, started);
 
 		/*
 		 * The session's settings back, before the planner plans what ORCA
@@ -399,6 +438,14 @@ gp_orca_planner(Query *parse, const char *query_string, int cursorOptions,
 		else
 			result = standard_planner(parse, query_string, cursorOptions,
 									  boundParams, es);
+		if (result != NULL && reason != GP_FALLBACK_nested &&
+			reason != GP_FALLBACK_not_dispatcher)
+			result->extension_state =
+				lappend(result->extension_state,
+						makeDefElem(pstrdup(GP_ORCA_FALLBACK_MARK),
+									(Node *) list_make2(makeString(pstrdup(GpOrcaFallbackReasonName(reason))),
+														makeInteger(tried ? (int) Min(INSTR_TIME_GET_MICROSEC(took), PG_INT32_MAX) : 0)),
+									-1));
 	}
 	else
 	{
@@ -409,6 +456,11 @@ gp_orca_planner(Query *parse, const char *query_string, int cursorOptions,
 			lappend(result->extension_state,
 					makeDefElem(pstrdup(GP_ORCA_PLAN_MARK),
 								(Node *) makeString(pstrdup("GPORCA")), -1));
+		result->extension_state =
+			lappend(result->extension_state,
+					makeDefElem(pstrdup(GP_ORCA_TIME_MARK),
+								(Node *) makeInteger((int) Min(INSTR_TIME_GET_MICROSEC(took), PG_INT32_MAX)),
+								-1));
 
 		/* a parallel retrieve cursor's endpoints, which gp_core decides */
 		if ((cursorOptions & GP_CURSOR_OPT_PARALLEL_RETRIEVE) &&
@@ -443,6 +495,41 @@ gp_orca_explain_per_plan(PlannedStmt *plannedstmt, IntoClause *into,
 							planned_by_orca(plannedstmt) ?
 							"GPORCA" : "Postgres query optimizer",
 							es);
+}
+
+/*
+ * A statement's optimizer in pg_otel_probe's span of it (its PLAN.md
+ * §4.7.4): cloudberry.optimizer, orca or postgres; the time ORCA took; and
+ * where ORCA was asked and the planner planned it, why.  On the coordinator
+ * alone: a segment's fragment is a part of a plan made there.  It reads the
+ * plan's marks, and so is safe on a failed statement's error path.
+ */
+static void
+gp_orca_report(QueryDesc *queryDesc, PgOtelProbeAttrs *attrs, int when)
+{
+	PlannedStmt *stmt = queryDesc->plannedstmt;
+	const GpCoreApi *core = cb_core_api();
+	Node	   *mark;
+
+	if (stmt == NULL || stmt->commandType == CMD_UTILITY ||
+		(core != NULL && core->get_role() == GP_ROLE_EXECUTE))
+		return;
+	if (planned_by_orca(stmt))
+	{
+		attrs->add_string(attrs, "cloudberry.optimizer", "orca");
+		if ((mark = plan_mark(stmt, GP_ORCA_TIME_MARK)) != NULL && IsA(mark, Integer))
+			attrs->add_int(attrs, "cloudberry.optimizer.time_us", intVal(mark));
+		return;
+	}
+	attrs->add_string(attrs, "cloudberry.optimizer", "postgres");
+	if ((mark = plan_mark(stmt, GP_ORCA_FALLBACK_MARK)) != NULL && IsA(mark, List) &&
+		list_length((List *) mark) == 2)
+	{
+		attrs->add_string(attrs, "cloudberry.optimizer.fallback_reason",
+						  strVal(linitial((List *) mark)));
+		if (intVal(lsecond((List *) mark)) > 0)
+			attrs->add_int(attrs, "cloudberry.optimizer.time_us", intVal(lsecond((List *) mark)));
+	}
 }
 
 void
@@ -498,6 +585,9 @@ GpOrcaInstallPlannerHook(void)
 
 	prev_planner_hook = planner_hook;
 	planner_hook = gp_orca_planner;
+
+	/* pg_otel_probe's spans of a statement, where it is loaded (§4.7.4) */
+	pg_otel_probe_register_statement_reporter(gp_orca_report, PG_OTEL_PROBE_ABORT_SAFE);
 
 	/*
 	 * Where a hint extension finds plan_hint_hook (optimizer/orca.h): the

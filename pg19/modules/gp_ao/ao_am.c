@@ -73,6 +73,7 @@
 #include "utils/snapmgr.h"
 
 #include "gp_ao.h"
+#include "pg_otel_probe_api.h"
 
 static const TableAmRoutine ao_row_methods;
 static const TableAmRoutine ao_column_methods;
@@ -151,6 +152,12 @@ ao_reader_read(Relation rel, AoBlockReader *rd, uint64 offset,
 	rd->next = offset + AO_BLOCK_HEADER_SIZE + hdr.stored_len;
 	if (rd->bytes_read != NULL)
 		*rd->bytes_read += AO_BLOCK_HEADER_SIZE + hdr.stored_len;
+	if (rd->totals != NULL)
+	{
+		rd->totals->blocks++;
+		rd->totals->stored += AO_BLOCK_HEADER_SIZE + hdr.stored_len;
+		rd->totals->raw += hdr.raw_len;
+	}
 	/* Cloudberry's fault as a block has been read, the table's or any's */
 	(void) AO_FAULT("AppendOnlyStorageRead_ReadNextBlock_success", rel);
 }
@@ -807,6 +814,7 @@ ao_scan_begin(Relation rel, Snapshot snapshot, int nkeys, ScanKeyData *key,
 		scan->strategy = GetAccessStrategy(BAS_BULKREAD);
 	ao_reader_init(&scan->row, cxt);
 	scan->row.bytes_read = &scan->bytes_read;
+	scan->row.totals = &scan->totals;
 	if (scan->columnar)
 	{
 		scan->cols = palloc_array(AoBlockReader, scan->natts);
@@ -815,6 +823,7 @@ ao_scan_begin(Relation rel, Snapshot snapshot, int nkeys, ScanKeyData *key,
 		{
 			ao_reader_init(&scan->cols[i], cxt);
 			scan->cols[i].bytes_read = &scan->bytes_read;
+			scan->cols[i].totals = &scan->totals;
 			scan->needed[i] = !TupleDescAttr(RelationGetDescr(rel), i)->attisdropped;
 		}
 	}
@@ -2462,6 +2471,29 @@ ao_relation_add_columns(Relation rel, int ncolumns, const AttrNumber *attnums,
 static TableAmExtRoutine ao_row_ext;
 static TableAmExtRoutine ao_column_ext;
 
+/*
+ * A scan of an append-optimized table in pg_otel_probe's span of it (its
+ * PLAN.md §4.7.4): its storage, the segment files it read, and the blocks
+ * and bytes it read and decoded -- decompressed.  It reads the scan's
+ * fields alone, and so is safe on a failed statement's error path.
+ */
+static void
+ao_report(PlanState *ps, PgOtelProbeAttrs *attrs, int when)
+{
+	AoScanDesc	scan;
+
+	if (!IsA(ps, SeqScanState) && !IsA(ps, SampleScanState))
+		return;
+	scan = (AoScanDesc) ((ScanState *) ps)->ss_currentScanDesc;
+	if (scan == NULL)
+		return;
+	attrs->add_string(attrs, "cloudberry.ao.storage", scan->columnar ? "ao_column" : "ao_row");
+	attrs->add_int(attrs, "cloudberry.ao.segment_files", scan->nsegfiles);
+	attrs->add_int(attrs, "cloudberry.ao.blocks_read", (int64) scan->totals.blocks);
+	attrs->add_int(attrs, "cloudberry.ao.bytes_read", (int64) scan->totals.stored);
+	attrs->add_int(attrs, "cloudberry.ao.bytes_decompressed", (int64) scan->totals.raw);
+}
+
 void
 ao_register_table_ams(void)
 {
@@ -2479,4 +2511,8 @@ ao_register_table_ams(void)
 
 	RegisterTableAmExtension(&ao_row_methods, &ao_row_ext);
 	RegisterTableAmExtension(&ao_column_methods, &ao_column_ext);
+
+	/* pg_otel_probe's spans of their scans, where it is loaded (§4.7.4) */
+	pg_otel_probe_register_scan_reporter(&ao_row_methods, ao_report, PG_OTEL_PROBE_ABORT_SAFE);
+	pg_otel_probe_register_scan_reporter(&ao_column_methods, ao_report, PG_OTEL_PROBE_ABORT_SAFE);
 }

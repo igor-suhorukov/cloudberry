@@ -147,6 +147,7 @@
 #include "gp_segment.h"
 #include "gp_settings.h"
 #include "gp_subselect.h"
+#include "pg_otel_probe_api.h"
 
 /* How much of a COPY's data is sent to libpq at a time. */
 #define ROUTE_CHUNK		65536
@@ -3102,6 +3103,26 @@ refuse_utility_key_update(Query *parse)
 	}
 }
 
+/*
+ * The planner's route's write in pg_otel_probe's span of its Dispatch (its
+ * PLAN.md §4.7.4, pg_otel_probe_api.h): the segments the statement was sent
+ * to -- a direct dispatch's, or the table's -- and whether the table is
+ * replicated, which every segment holds whole.  It reads the node's fields
+ * alone, and so is safe on a failed statement's error path.
+ */
+static void
+modify_report(PlanState *ps, PgOtelProbeAttrs *attrs, int when)
+{
+	ModifyState *state = (ModifyState *) ps;
+
+	attrs->add_string(attrs, "cloudberry.motion.type", "dml");
+	attrs->add_int(attrs, "cloudberry.dispatch.segments",
+				   state->ncontents > 0 ? state->ncontents : state->nsegments);
+	attrs->add_bool(attrs, "cloudberry.dispatch.direct_dispatch", state->ncontents > 0);
+	if (state->replicated)
+		attrs->add_bool(attrs, "cloudberry.dispatch.replicated", true);
+}
+
 void
 GpModifyInit(void)
 {
@@ -3120,6 +3141,10 @@ GpModifyInit(void)
 	RegisterCustomScanMethods(&insert_scan_methods);
 	RegisterCustomScanMethods(&modify_scan_methods);
 	GpExplicitInit();
+
+	/* pg_otel_probe's spans of a write's Dispatch, where it is loaded (§4.7.4) */
+	pg_otel_probe_register_node_reporter(&modify_exec_methods, modify_report,
+										 PG_OTEL_PROBE_ABORT_SAFE);
 
 	prev_planner = planner_hook;
 	planner_hook = gp_modify_planner;

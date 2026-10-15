@@ -47,6 +47,7 @@
 #include "gp_catalog.h"
 #include "gp_cluster.h"
 #include "gp_core_api.h"
+#include "gp_counters.h"
 #include "gp_dbcopy.h"
 #include "gp_dirxact.h"
 #include "gp_dispatch.h"
@@ -149,6 +150,11 @@ static const GpCoreApi gp_core_api = {
 	.hash_segment = GpHashSegmentOfKey,
 	.squelch_subtree = GpMotionSquelch,
 	.explain_register = GpExplainRegister,
+	.slice_info = GpMotionSliceInfo,
+	.coordinator_statement = GpLogCoordinatorStatement,
+	.cluster_nodes = GpClusterNodesForApi,
+	.dispatch_counters = GpCountersDispatch,
+	.interconnect_counters = GpCountersInterconnect,
 };
 
 /*
@@ -270,6 +276,12 @@ _PG_init(void)
 	 */
 	GpIcInit();
 	GpShareInit();
+
+	/*
+	 * The dispatcher's and the interconnect's figures, the node's over every
+	 * backend, for a module that reports the cluster's metrics (1.16).
+	 */
+	GpCountersInit();
 
 	/*
 	 * Distributed transactions: two-phase commit, the segments' distributed

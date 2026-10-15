@@ -41,7 +41,8 @@ extern void GpLogInit(void);
 /*
  * On a segment, the coordinator's statement this backend runs a part of, as
  * what it was sent carries it -- a DDL tree's text, or the comment above --
- * or NULL: what the part's phases show (gp_dtx.c).
+ * or NULL: what the part's phases show (gp_dtx.c), and what another module
+ * asks of it (GpCoreApi.coordinator_statement, 1.16).
  */
 extern const char *GpLogCoordinatorStatement(void);
 

@@ -58,6 +58,15 @@ extern const struct VexecSourceRoutine *PaxVexecSource(void);
 struct VexecSinkRoutine;
 extern const struct VexecSinkRoutine *PaxVexecSink(void);
 
+/*
+ * A scan of a PAX table, for a module's figures of it (pg_otel_probe's
+ * reporter, pax.c): the files and the groups its sparse filter passed over
+ * by their statistics, and those it examined -- counts[0..3]: files skipped,
+ * files, groups skipped, groups.  False without a sparse filter.
+ */
+struct TableScanDescData;
+extern bool PaxScanFilterStatistics(struct TableScanDescData *scan, int64 *counts);
+
 #ifdef __cplusplus
 }
 #endif

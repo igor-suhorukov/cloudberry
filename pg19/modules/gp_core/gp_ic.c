@@ -145,6 +145,7 @@
 
 #include "gp_cluster.h"
 #include "gp_fault.h"
+#include "gp_counters.h"
 #include "gp_ic.h"
 
 /* What a sender says first. */
@@ -375,6 +376,7 @@ static List *receivers = NIL;	/* IcReceiver */
 static List *senders = NIL;		/* IcSender */
 
 static bool udp_poll(void);
+static int	counted_transport(const GpIcTransport *transport);
 
 static uint32
 ic_wait_event(bool send)
@@ -1752,6 +1754,8 @@ udp_transmit(IcSender *s, IcOut *out, IcUdpSent *p)
 			s->self, out->index, p->offset, 0, p->data, p->len);
 	p->sent_at = GetCurrentTimestamp();
 	p->tries++;
+	if (p->tries > 1)
+		GpCountIcRetransmitted(counted_transport(s->base.transport), 1);
 	if (p->tries > 1 && (p->tries - 1) % gp_interconnect_debug_retry_interval == 0)
 		elog(DEBUG1, "resending packet (offset " UINT64_FORMAT ") to %s with %d retries",
 			 p->offset, out->address, p->tries - 1);
@@ -2489,6 +2493,15 @@ GpIcStreamSlice(GpIcStream *stream, int slice)
 	return NULL;
 }
 
+/*
+ * The sender begun last and its receivers, for the counters
+ * (gp_counters.c): a row sent to every receiver, a Broadcast's, goes to
+ * each.  A process sends one slice, through the Motion at the top of its
+ * fragment; a row of another sender counts once.
+ */
+static const GpIcSender *counted_sender = NULL;
+static int	counted_receivers = 1;
+
 GpIcSender *
 GpIcSendBegin(GpIcStream *stream, int slice)
 {
@@ -2502,13 +2515,39 @@ GpIcSendBegin(GpIcStream *stream, int slice)
 			 slice);
 	sender = stream->transport->send_begin(stream, s);
 	sender->transport = stream->transport;
+	counted_sender = sender;
+	counted_receivers = Max(s->nreceivers, 1);
 	return sender;
 }
 
+/*
+ * A transport's place among the registered ones, for its counters
+ * (gp_counters.c): the last one asked, kept, as a statement's rows go
+ * through one.
+ */
+static int
+counted_transport(const GpIcTransport *transport)
+{
+	static const GpIcTransport *last = NULL;
+	static int	last_index = -1;
+
+	if (transport != last)
+	{
+		last = transport;
+		last_index = GpIcTransportIndex(transport);
+	}
+	return last_index;
+}
+
+/* A row sent to every receiver counts once for each (counted_sender). */
 void
 GpIcSend(GpIcSender *sender, int receiver, const char *data, int len)
 {
+	int			copies = receiver < 0 && sender == counted_sender ?
+		counted_receivers : 1;
+
 	sender->transport->send(sender, receiver, data, len);
+	GpCountIcSent(counted_transport(sender->transport), len, copies);
 }
 
 bool
@@ -2521,6 +2560,7 @@ void
 GpIcSendEnd(GpIcSender *sender)
 {
 	sender->transport->send_end(sender);
+	GpCountIcFlush();
 }
 
 GpIcReceiver *
@@ -2541,19 +2581,26 @@ GpIcRecvBegin(GpIcStream *stream, int slice)
 bool
 GpIcRecv(GpIcReceiver *receiver, char **data, int *len)
 {
-	return receiver->transport->recv(receiver, data, len);
+	if (!receiver->transport->recv(receiver, data, len))
+		return false;
+	GpCountIcReceived(counted_transport(receiver->transport), *len);
+	return true;
 }
 
 bool
 GpIcRecvFrom(GpIcReceiver *receiver, int k, char **data, int *len)
 {
-	return receiver->transport->recv_from(receiver, k, data, len);
+	if (!receiver->transport->recv_from(receiver, k, data, len))
+		return false;
+	GpCountIcReceived(counted_transport(receiver->transport), *len);
+	return true;
 }
 
 void
 GpIcRecvEnd(GpIcReceiver *receiver)
 {
 	receiver->transport->recv_end(receiver);
+	GpCountIcFlush();
 }
 
 /*

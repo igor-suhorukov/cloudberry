@@ -503,6 +503,7 @@ modules = [
                      'modules/gp_core/gp_record.c',
                      'modules/gp_core/gp_metatrack.c',
                      'modules/gp_core/gp_ic.c',
+                     'modules/gp_core/gp_counters.c',
                      'modules/gp_core/gp_label.c',
                      'modules/gp_core/gp_catalog.c',
                      'modules/gp_core/gp_median.c',

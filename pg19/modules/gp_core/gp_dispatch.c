@@ -133,6 +133,7 @@
 
 #include "gp_cluster.h"
 #include "gp_core_api.h"
+#include "gp_counters.h"
 #include "gp_dispatch.h"
 #include "gp_dtm_debug.h"
 #include "gp_dtx.h"
@@ -281,6 +282,32 @@ static const char *const synced_settings[] = {
 	"gp.debug_appendonly_print_compaction",
 	"gp.debug_appendonly_print_segfile_choice",
 	"gp.debug_appendonly_print_visimap",
+	/*
+	 * pg_otel_probe's, which only a superuser sets: what a segment captures
+	 * of the statement the coordinator's session traces -- its profile, its
+	 * threshold, its sampling, the plan nodes' instrumentation, query
+	 * records and parameter values -- so that each node records alike
+	 * (pg_otel_probe's PLAN.md §4.7.2).  Passed over where pg_otel_probe is
+	 * not loaded, and not set.  Likewise.
+	 */
+	"pg_otel_probe.profile",
+	"pg_otel_probe.query_min_duration",
+	"pg_otel_probe.trace_sample_rate",
+	"pg_otel_probe.enable_statement_timing",
+	"pg_otel_probe.plan_sample_rate",
+	"pg_otel_probe.plan_nodes",
+	"pg_otel_probe.plan_buffers",
+	"pg_otel_probe.plan_wal",
+	"pg_otel_probe.plan_io",
+	"pg_otel_probe.plan_columns",
+	"pg_otel_probe.plan_hints",
+	"pg_otel_probe.plan_conditions",
+	"pg_otel_probe.plan_timeline",
+	"pg_otel_probe.plan_max_nodes",
+	"pg_otel_probe.plan_node_min_ms",
+	"pg_otel_probe.plan_worker_spans",
+	"pg_otel_probe.query_records",
+	"pg_otel_probe.enable_param_value",
 	"search_path",
 	"role",
 	"DateStyle",
@@ -559,6 +586,23 @@ static const char *const synced_settings[] = {
 	"vexec.gpu_setup_cost",
 	"vexec.gpu_transfer_cost",
 	"vexec.gpu_operator_factor",
+	/*
+	 * pg_otel_probe's trace context (its PLAN.md §4.7.2): the client's, which
+	 * a segment's statements join where nothing else says where they hang;
+	 * and the hidden ones the coordinator sets for each statement it traces
+	 * -- its sampling decision with its trace, and where each slice hangs
+	 * (mpp_sampled, mpp_parents) -- and for its parallel workers.  Passed
+	 * over where pg_otel_probe is not loaded.
+	 */
+	"pg_otel_probe.trace_context",
+	"pg_otel_probe.trace_id",
+	"pg_otel_probe.span_id",
+	"pg_otel_probe.trace_flags",
+	"pg_otel_probe.trace_state",
+	"pg_otel_probe.parent_span",
+	"pg_otel_probe.leader_session",
+	"pg_otel_probe.mpp_sampled",
+	"pg_otel_probe.mpp_parents",
 };
 
 #define NUM_SYNCED_SETTINGS	lengthof(synced_settings)
@@ -586,6 +630,24 @@ static const char *const superuser_settings[] = {
 	"gp.debug_appendonly_print_compaction",
 	"gp.debug_appendonly_print_segfile_choice",
 	"gp.debug_appendonly_print_visimap",
+	"pg_otel_probe.profile",
+	"pg_otel_probe.query_min_duration",
+	"pg_otel_probe.trace_sample_rate",
+	"pg_otel_probe.enable_statement_timing",
+	"pg_otel_probe.plan_sample_rate",
+	"pg_otel_probe.plan_nodes",
+	"pg_otel_probe.plan_buffers",
+	"pg_otel_probe.plan_wal",
+	"pg_otel_probe.plan_io",
+	"pg_otel_probe.plan_columns",
+	"pg_otel_probe.plan_hints",
+	"pg_otel_probe.plan_conditions",
+	"pg_otel_probe.plan_timeline",
+	"pg_otel_probe.plan_max_nodes",
+	"pg_otel_probe.plan_node_min_ms",
+	"pg_otel_probe.plan_worker_spans",
+	"pg_otel_probe.query_records",
+	"pg_otel_probe.enable_param_value",
 };
 
 /*
@@ -1878,6 +1940,14 @@ gang_connect(void)
 				 PQbackendPID(conn));
 	}
 	gang_made_times(attempts, nsegs);
+	{
+		double		ms = 0;
+
+		for (int i = 0; i < nsegs; i++)
+			ms += attempts[i].ms;
+		GpCountConnections(nsegs, ms);
+		GpCountGang(true);
+	}
 	pfree(attempts);
 
 	gang_build_wes(gang);
@@ -2084,7 +2154,10 @@ gang_get(void)
 	if (gang == NULL)
 		gang_connect();
 	else
+	{
 		gang_reused_report();
+		GpCountGang(false);
+	}
 	return gang;
 }
 
@@ -3017,6 +3090,7 @@ raise_segment_errors(List *errors)
 	const GpSegmentConfig *seg;
 	StringInfoData detail;
 
+	GpCountDispatchError();
 	flush_segment_notices();
 
 	/*
@@ -3707,6 +3781,7 @@ reader_connect(GpGang *g, int content)
 	conn_attempt_init(&attempt, GpClusterSegmentByContent(content),
 					  get_database_name(MyDatabaseId), gang_username, true);
 	connect_segments(&attempt, 1);
+	GpCountConnections(1, attempt.ms);
 	conn = attempt.conn;
 
 	r = MemoryContextAllocZero(TopMemoryContext, sizeof(GpReaderConn));
@@ -5791,6 +5866,7 @@ GpDispatchUtility(const char *payload, bool own_xact, bool relay_notices)
 	notices_quiet++;
 	if (relay_notices)
 		notices_relayed = notices_quiet;
+	GpCountDispatch();
 	gang_send_all_dtm(g, payload, GP_DTX_NONE, "MPPEXEC UTILITY", 0);
 	gang_wait_all(g, NULL, false);
 	forget_relayed_notices();
@@ -5816,6 +5892,7 @@ GpDispatchCommandParams(const char *sql, int nparams, const Oid *types,
 	int			n = 0;
 
 	gang_prepare(g, true);
+	GpCountDispatch();
 	results = (PGresult **) palloc0_array(PGresult *, g->nconns);
 
 	for (int i = 0; i < g->nconns; i++)
@@ -5847,6 +5924,7 @@ GpDispatchCommandParamsOnContents(const char *sql, int nparams,
 	PGresult  **results;
 
 	gang_prepare(g, true);
+	GpCountDispatch();
 
 	for (int i = 0; i < g->nconns; i++)
 	{
@@ -5930,6 +6008,7 @@ GpDispatchWriteOnContent(int content, const char *sql, int nparams,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("there is no segment with content id %d", content)));
 
+	GpCountDispatch();
 	conn_send_params(c, sql, nparams, NULL, values, NULL, NULL);
 
 	results = (PGresult **) palloc0_array(PGresult *, g->nconns);
@@ -6009,6 +6088,7 @@ GpDispatchWriteReturning(const char *sql, int content, const int *contents,
 	bool		kept = false;
 
 	gang_prepare(g, true);
+	GpCountDispatch();
 
 	for (int i = 0; i < g->nconns; i++)
 	{
@@ -6153,8 +6233,12 @@ GpCopyInBegin(const int *contents, int ncontents, const char *sql,
 	List	   *errors = NIL;
 	int			waiting;
 
+	/* a COPY counts once, however many of its segments begin it in turn */
 	if (ncopying == 0)
+	{
 		gang_prepare(g, true);
+		GpCountDispatch();
+	}
 
 	for (int i = 0; i < g->nconns; i++)
 	{
@@ -6940,6 +7024,7 @@ gather_start(const char *sql, TupleDesc tupdesc, int content, int nsegments,
 	const char *statement = GpLogStatementComment();
 
 	GpDispatchCheckPlanSize(sql);
+	GpCountDispatch();
 
 	/*
 	 * Where Cloudberry's coordinator sets up the interconnect its slices'

@@ -26,6 +26,12 @@
  * Ported to PostgreSQL 19: a tuple descriptor's attributes are reached
  * through TupleDescAttr(), PostgreSQL 19's TupleDescData having no attrs[]
  * array.
+ *
+ * From the port: the files and the groups the filter examines and passes
+ * over are counted always, where Cloudberry's counted them under
+ * pax.enable_debug alone, for LogStatistics(); Statistics() gives the
+ * counts, for pg_otel_probe's reporter of PAX's scans
+ * (PaxScanFilterStatistics(), modules/pax/pax.c).
  *-------------------------------------------------------------------------
  */
 
@@ -313,14 +319,19 @@ bool PaxSparseFilter::ExecFilter(const ColumnStatsProvider &provider,
   }
 
 no_filter:
-  if (pax_enable_debug) {
-    if (!filter_failed) {
-      hits_[kind].fetch_add(1);
-    }
-
-    totals_[kind].fetch_add(1);
+  // always counted: what LogStatistics() logs under pax.enable_debug, and
+  // what a scan's figures say (Statistics())
+  if (!filter_failed) {
+    hits_[kind].fetch_add(1, std::memory_order_relaxed);
   }
+  totals_[kind].fetch_add(1, std::memory_order_relaxed);
   return filter_failed;
+}
+
+void PaxSparseFilter::Statistics(int kind, int64 *skipped,
+                                 int64 *examined) const {
+  *skipped = hits_[kind].load(std::memory_order_relaxed);
+  *examined = totals_[kind].load(std::memory_order_relaxed);
 }
 
 static Form_pg_attribute CheckAndGetAttr(AttrNumber column_index,
