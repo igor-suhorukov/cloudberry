@@ -43,6 +43,14 @@
 # stopped short (greenplum's, diskquota's regress, pax's toast, the ORCA
 # pass of postgis_regress), and for resgroup's, whose servers move to cgroup
 # parents outside the job's cgroup, where the summary does not see them.
+#
+# PGPORT= is the first port of a job of the greenplum suite's harness --
+# greenplum's, pax_regress's, ic_greenplum's -- whose tcp group's nodes
+# listen on 127.0.0.1 (greenplum/run.sh), as the proxies do: two such jobs
+# side by side, each taking its ports at random from the same two hundred,
+# met on one now and then ("could not bind IPv4 address"), and two of them
+# fit in the memory at once.  Sixty apart, each job's nodes' ports its own,
+# and above the stand-ins' of pxf_fdw and gpcloud, 7320 to 7719.
 
 resgroup               orca_cpu 103   PASSES=orca RG_GROUPS=cpu ALONE=1 CPUS=16-31 MEM=1500
 resgroup               planner_cpu 102 PASSES=planner RG_GROUPS=cpu ALONE=1 CPUS=0-15 MEM=1500
@@ -56,13 +64,13 @@ singlenode_resgroup    orca_cpuset 65 PASSES=orca RG_GROUPS=cpuset MEM=800
 singlenode_resgroup    planner_cpuset 65 PASSES=planner RG_GROUPS=cpuset MEM=800
 singlenode_resgroup    orca     100   PASSES=orca RG_GROUPS=main MEM=800
 singlenode_resgroup    planner  100   PASSES=planner RG_GROUPS=main MEM=800
-greenplum              orca     136   PASSES=orca MEM=19500
+greenplum              orca     136   PASSES=orca PGPORT=7800 MEM=19500
 diskquota              regress  121   DQ_PARTS=regress DQ_GROUP=main MEM=5500
 diskquota              ctas     101   DQ_PARTS=regress DQ_GROUP=ctas MEM=6000
 diskquota              ctas_spc 102   DQ_PARTS=regress DQ_GROUP=ctas_spc MEM=6000
-greenplum              planner  106   PASSES=planner MEM=17500
-pax_regress            orca     200   PASSES=orca MEM=20000
-pax_regress            planner  180   PASSES=planner MEM=18500
+greenplum              planner  106   PASSES=planner PGPORT=7860 MEM=17500
+pax_regress            orca     200   PASSES=orca PGPORT=7920 MEM=20000
+pax_regress            planner  180   PASSES=planner PGPORT=7980 MEM=18500
 resgroup_v1            -        571   MEM=1500
 pax_isolation2         orca     160   PASSES=orca MEM=17500
 pax_isolation2         planner  160   PASSES=planner MEM=17500
@@ -86,8 +94,8 @@ ic                     -         30   MEM=900
 # ic_greenplum and ic_isolation2 run only on request (CB_IC; ic_greenplum/run.sh):
 # greenplum's and isolation2's ORCA passes again, over udp2 and over the
 # proxy, which every full run's ic checks; skipped at once otherwise.
-ic_greenplum           udp2     140   IC=udp2 PASSES=orca MEM=20000
-ic_greenplum           proxy    140   IC=proxy PASSES=orca MEM=20000
+ic_greenplum           udp2     140   IC=udp2 PASSES=orca PGPORT=8040 MEM=20000
+ic_greenplum           proxy    140   IC=proxy PASSES=orca PGPORT=8100 MEM=20000
 ic_isolation2          udp2     140   IC=udp2 PASSES=orca MEM=34000
 ic_isolation2          proxy    140   IC=proxy PASSES=orca MEM=34000
 orca                   -         54   MEM=300
