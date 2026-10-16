@@ -274,6 +274,14 @@ make_cluster() {
 			# has it: alter_db_set_tablespace shows it, and has a mirror's
 			# restartpoint sync what a moved database had
 			echo "fsync = $(has_mirrors "$g" && echo on || echo off)"
+			# A checkpoint for every 64 MB of WAL, and 32 MB of it kept for
+			# reuse, where PostgreSQL waits for 1 GB: every node's data is in
+			# the container's memory, /tmp a tmpfs, and WAL was most of what
+			# the servers of the suite's ORCA pass wrote, 8 GB of 10.  The
+			# pass holds 14.7 GB at most so, where it held 18.3, and the
+			# planner's 13.7 where it held 16.6 (../jobs).  Not in a group
+			# with mirrors, whose standby streams without a slot.
+			has_mirrors "$g" || printf 'max_wal_size = 64MB\nmin_wal_size = 32MB\n'
 			[ -n "${GP_SETTINGS:-}" ] && echo "$GP_SETTINGS"
 			[ -n "${GP_INTERCONNECT:-}" ] && echo "gp.interconnect_type = '$INTERCONNECT'"
 			[ "$INTERCONNECT" = proxy ] &&

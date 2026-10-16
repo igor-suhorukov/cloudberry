@@ -37,12 +37,15 @@
 # nothing else, and run.sh's summary gives each run's own.
 #
 # MEM= is the most memory the job holds, in megabytes -- its servers' data,
-# WAL and shared memory, /tmp being a tmpfs -- as run.sh's summary gave it,
-# and some to spare: run.sh starts a job only while there is that much left
-# for it.  More than the summary said for the jobs the run's OOM killer
-# stopped short (greenplum's, diskquota's regress, pax's toast, the ORCA
-# pass of postgis_regress), and for resgroup's, whose servers move to cgroup
-# parents outside the job's cgroup, where the summary does not see them.
+# WAL and shared memory, /tmp being a tmpfs -- as run.sh's summaries gave
+# it, the most of several runs, between which a long job's figure moved 5%
+# at most, and some to spare, about 5% and 200 MB: run.sh starts a job only
+# while there is that much left for it.  ic_greenplum's and ic_isolation2's
+# are from two runs of theirs (CB_IC=all).  The servers keep 64 MB of WAL a
+# node, where PostgreSQL keeps up to a gigabyte, but in a group with mirrors
+# or a standby (greenplum/run.sh).  More than the summary said for
+# resgroup's, whose servers move to cgroup parents outside the job's cgroup,
+# where the summary does not see them.
 #
 # PGPORT= is the first port of a job of the greenplum suite's harness --
 # greenplum's, pax_regress's, ic_greenplum's -- whose tcp group's nodes
@@ -64,46 +67,46 @@ singlenode_resgroup    orca_cpuset 65 PASSES=orca RG_GROUPS=cpuset MEM=800
 singlenode_resgroup    planner_cpuset 65 PASSES=planner RG_GROUPS=cpuset MEM=800
 singlenode_resgroup    orca     100   PASSES=orca RG_GROUPS=main MEM=800
 singlenode_resgroup    planner  100   PASSES=planner RG_GROUPS=main MEM=800
-greenplum              orca     136   PASSES=orca PGPORT=7800 MEM=19500
-diskquota              regress  121   DQ_PARTS=regress DQ_GROUP=main MEM=5500
-diskquota              ctas     101   DQ_PARTS=regress DQ_GROUP=ctas MEM=6000
-diskquota              ctas_spc 102   DQ_PARTS=regress DQ_GROUP=ctas_spc MEM=6000
-greenplum              planner  106   PASSES=planner PGPORT=7860 MEM=17500
-pax_regress            orca     200   PASSES=orca PGPORT=7920 MEM=20000
-pax_regress            planner  180   PASSES=planner PGPORT=7980 MEM=18500
+greenplum              orca     136   PASSES=orca PGPORT=7800 MEM=15700
+diskquota              regress  121   DQ_PARTS=regress DQ_GROUP=main MEM=4900
+diskquota              ctas     101   DQ_PARTS=regress DQ_GROUP=ctas MEM=5900
+diskquota              ctas_spc 102   DQ_PARTS=regress DQ_GROUP=ctas_spc MEM=5900
+greenplum              planner  106   PASSES=planner PGPORT=7860 MEM=14600
+pax_regress            orca     200   PASSES=orca PGPORT=7920 MEM=15600
+pax_regress            planner  180   PASSES=planner PGPORT=7980 MEM=13000
 resgroup_v1            -        571   MEM=1500
-pax_isolation2         orca     160   PASSES=orca MEM=17500
-pax_isolation2         planner  160   PASSES=planner MEM=17500
-singlenode             orca     165   PASSES=orca MEM=5500
-pax                    toast     78   PAX_GROUP=toast MEM=5000
+pax_isolation2         orca     160   PASSES=orca MEM=16900
+pax_isolation2         planner  160   PASSES=planner MEM=17000
+singlenode             orca     165   PASSES=orca MEM=4700
+pax                    toast     78   PAX_GROUP=toast MEM=4500
 pax                    -         20   PAX_GROUP=main MEM=2200
-isolation2             orca     149   PASSES=orca MEM=34000
-postgis_regress        orca     102   PASSES=orca MEM=6000
-isolation2             planner  146   PASSES=planner MEM=34000
-diskquota              isolation2 105   DQ_PARTS=isolation2 MEM=2000
-gpmgmt                 -        270   MEM=2000
+isolation2             orca     149   PASSES=orca MEM=31300
+postgis_regress        orca     102   PASSES=orca MEM=5200
+isolation2             planner  146   PASSES=planner MEM=30400
+diskquota              isolation2 105   DQ_PARTS=isolation2 MEM=1900
+gpmgmt                 -        270   MEM=1800
 expandshrink           orca      85   PASSES=orca MEM=2500
 expandshrink           planner   85   PASSES=planner MEM=2500
 # tpc runs only on request (CB_TPC; tpc/run.sh) and is skipped at once
 # otherwise.  Checked, on four segments: its data and DuckDB's CSV files as
 # they are loaded, in the tmpfs, 10.9 GB at most.
 tpc                    -         90   MEM=12000
-singlenode             planner   26   PASSES=planner MEM=3500
+singlenode             planner   26   PASSES=planner MEM=2800
 cluster                -        115   MEM=900
-ic                     -         30   MEM=900
+ic                     -         30   MEM=700
 # ic_greenplum and ic_isolation2 run only on request (CB_IC; ic_greenplum/run.sh):
 # greenplum's and isolation2's ORCA passes again, over udp2 and over the
 # proxy, which every full run's ic checks; skipped at once otherwise.
-ic_greenplum           udp2     140   IC=udp2 PASSES=orca PGPORT=8040 MEM=20000
-ic_greenplum           proxy    140   IC=proxy PASSES=orca PGPORT=8100 MEM=20000
-ic_isolation2          udp2     140   IC=udp2 PASSES=orca MEM=34000
-ic_isolation2          proxy    140   IC=proxy PASSES=orca MEM=34000
+ic_greenplum           udp2     140   IC=udp2 PASSES=orca PGPORT=8040 MEM=15500
+ic_greenplum           proxy    140   IC=proxy PASSES=orca PGPORT=8100 MEM=15200
+ic_isolation2          udp2     140   IC=udp2 PASSES=orca MEM=30800
+ic_isolation2          proxy    140   IC=proxy PASSES=orca MEM=31100
 orca                   -         54   MEM=300
 fts                    -         55   MEM=1000
-gpfts                  -         73   MEM=1300
+gpfts                  -         73   MEM=1200
 postgis_cluster        -         16   MEM=1700
 dump                   -         30   MEM=1700
-postgis_regress        planner   10   PASSES=planner MEM=2600
+postgis_regress        planner   10   PASSES=planner MEM=2500
 hooks                  -         28   MEM=300
 task                   -         32   MEM=300
 pax_gtest              -         10   MEM=400

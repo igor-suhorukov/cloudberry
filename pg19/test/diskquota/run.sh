@@ -133,6 +133,8 @@ for n in $(seq 0 $((NODES - 1))); do
 		echo "listen_addresses = ''"
 		echo "port = $(port "$n")"
 		echo "fsync = off"
+		# WAL kept to 64 MB, as the greenplum suite's servers keep it (../greenplum/run.sh)
+		printf 'max_wal_size = 64MB\nmin_wal_size = 32MB\n'
 		echo "gp.cluster_config = '$CONF'"
 		echo "gp.dbid = $((n + 1))"
 		echo "gp.cluster_secret = '$SECRET'"

@@ -310,6 +310,8 @@ start_nodes() {				# start_nodes <node...>
 			echo "listen_addresses = ''"
 			echo "port = $(port "$n")"
 			echo "fsync = off"
+			# WAL kept to 64 MB, as the greenplum suite's servers keep it (../greenplum/run.sh)
+			printf 'max_wal_size = 64MB\nmin_wal_size = 32MB\n'
 			if [ "$n" != 9 ]; then
 				echo "gp.cluster_config = '$CONF'"
 				echo "gp.dbid = $((n + 1))"

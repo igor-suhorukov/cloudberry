@@ -290,6 +290,11 @@ make_cluster() {
 			echo "listen_addresses = ''"
 			echo "port = $(node_port "$gi" "$n")"
 			echo "fsync = off"
+			# WAL kept to 64 MB a node, as the greenplum suite's servers keep
+			# it (../greenplum/run.sh): each pass holds under 30 GB so, where
+			# it held 32.  Not in a group with a standby or mirrors,
+			# whose tests switch WAL and keep it for them (segwalrep)
+			has_standby "$g" || printf 'max_wal_size = 64MB\nmin_wal_size = 32MB\n'
 			[ -n "${ISOLATION2_SETTINGS:-}" ] && echo "$ISOLATION2_SETTINGS"
 			[ -n "${ISOLATION2_INTERCONNECT:-}" ] && echo "gp.interconnect_type = '$INTERCONNECT'"
 			[ "$INTERCONNECT" = proxy ] &&

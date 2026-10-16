@@ -149,6 +149,8 @@ start_server() {
 		echo "listen_addresses = ''"
 		echo "port = $PORT"
 		echo "fsync = off"
+		# WAL kept to 64 MB, as the greenplum suite's servers keep it (../greenplum/run.sh)
+		printf 'max_wal_size = 64MB\nmin_wal_size = 32MB\n'
 		echo "shared_preload_libraries = 'gp_core,gp_orca,gp_task,gp_matview,gp_sql,gp_security'"
 	} >> "$dir/data/postgresql.conf"
 	"$BINDIR/pg_ctl" -D "$dir/data" -l "$dir/log" -w -t 60 start > /dev/null 2>&1 \

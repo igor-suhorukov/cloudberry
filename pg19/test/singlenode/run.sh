@@ -155,6 +155,8 @@ echo
 	echo "listen_addresses = ''"
 	echo "port = $PORT"
 	echo "fsync = off"
+	# WAL kept to 64 MB, as the greenplum suite's servers keep it (../greenplum/run.sh)
+	printf 'max_wal_size = 64MB\nmin_wal_size = 32MB\n'
 	# Every module there is to load here, in the order cloudberry.md gives:
 	# M1's, gp_ao and gp_exttable, M5's, and gp_resource, M6's.
 	echo "shared_preload_libraries = 'gp_core,gp_orca,gp_task,gp_matview,gp_sql,gp_security,gp_ao,gp_exttable,gp_resource'"
