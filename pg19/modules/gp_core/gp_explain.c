@@ -612,6 +612,7 @@ typedef struct GpReportNode
 	TimestampTz firststart;		/* 0 where not asked for */
 	int64		execmem;		/* its own context's bytes, 0 where not asked */
 	int64		workmem;		/* bytes of work_mem a Sort, hash or Material used */
+	int32		sort_method;	/* a Sort's TuplesortMethods, 0 where none */
 	int64		nsearches;		/* an index scan's searches */
 	int32		nworkers;		/* the workers a Gather launched, at most */
 	WalUsage	wal;
@@ -998,6 +999,7 @@ node_work_mem(PlanState *ps, GpReportNode *n)
 				tuplesort_get_stats((Tuplesortstate *) sort->tuplesortstate, &stats);
 				n->workmem = stats.spaceUsed * 1024;
 				n->spilled = stats.spaceType == SORT_SPACE_TYPE_DISK;
+				n->sort_method = (int32) stats.sortMethod;
 				break;
 			}
 		case T_MaterialState:
@@ -1358,6 +1360,7 @@ add_figures(SegFigures *to, const GpReportNode *n)
 		t->firststart = n->firststart;
 	t->execmem = Max(t->execmem, n->execmem);
 	t->workmem = Max(t->workmem, n->workmem);
+	t->sort_method |= n->sort_method;
 	t->nsearches += n->nsearches;
 	t->nworkers = Max(t->nworkers, n->nworkers);
 	wal_add(&t->wal, &n->wal);
@@ -1728,6 +1731,80 @@ format_ms(double ms, bool unit)
 }
 
 /*
+ * How a Sort the segments ran sorted, as Cloudberry's EXPLAIN ANALYZE says
+ * it of a node of a segment's slice (show_sort_info()): a line for each
+ * method the segments used, with the memory or disk they used for it,
+ * summed, and with VERBOSE the most one used and the average.  PostgreSQL's
+ * own line is the coordinator's, where it ran the Sort itself; a Sort of a
+ * segment's slice printed none, and a check that reads one in the plan
+ * found none (the sort and runtime_stats tests).
+ */
+static void
+print_sort_methods(SegFigures *segs, int nsegs, ExplainState *es)
+{
+	static const TuplesortMethod methods[] = {
+		SORT_TYPE_TOP_N_HEAPSORT, SORT_TYPE_QUICKSORT,
+		SORT_TYPE_EXTERNAL_SORT, SORT_TYPE_EXTERNAL_MERGE
+	};
+
+	for (int i = 0; i < lengthof(methods); i++)
+	{
+		/* by space type: the memory's, then the disk's */
+		StatAgg		space[2] = {{0}, {0}};
+		StatAgg    *agg = NULL;
+		const char *type = NULL;
+
+		for (int c = 0; c < nsegs; c++)
+		{
+			GpReportNode *n = &segs[c].node;
+
+			if (!segs[c].seen || !(n->sort_method & methods[i]))
+				continue;
+			space[n->spilled ? 1 : 0].vsum += KB(n->workmem);
+			if (KB(n->workmem) > space[n->spilled ? 1 : 0].vmax)
+				space[n->spilled ? 1 : 0].vmax = KB(n->workmem);
+			space[n->spilled ? 1 : 0].vcnt++;
+		}
+		for (int j = 0; j < 2 && agg == NULL; j++)
+		{
+			if (space[j].vcnt > 0)
+			{
+				agg = &space[j];
+				type = tuplesort_space_type_name(j == 0 ? SORT_SPACE_TYPE_MEMORY
+												 : SORT_SPACE_TYPE_DISK);
+			}
+		}
+		if (agg == NULL)
+			continue;
+
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			ExplainIndentText(es);
+			appendStringInfo(es->str, "Sort Method:  %s  %s: %ldkB\n",
+							 tuplesort_method_name(methods[i]), type,
+							 (long) agg->vsum);
+			if (es->verbose)
+				appendStringInfo(es->str, "  Max Memory: %ldkB  Avg Memory: %ldkB (%d segments)\n",
+								 (long) agg->vmax, (long) (agg->vsum / agg->vcnt),
+								 agg->vcnt);
+		}
+		else
+		{
+			ExplainPropertyText("Sort Method", tuplesort_method_name(methods[i]), es);
+			ExplainPropertyInteger("Sort Space Used", "kB", (int64) agg->vsum, es);
+			ExplainPropertyText("Sort Space Type", type, es);
+			if (es->verbose)
+			{
+				ExplainPropertyInteger("Sort Max Segment Memory", "kB", (int64) agg->vmax, es);
+				ExplainPropertyInteger("Sort Avg Segment Memory", "kB",
+									   (int64) (agg->vsum / agg->vcnt), es);
+				ExplainPropertyInteger("Sort Segments", NULL, agg->vcnt, es);
+			}
+		}
+	}
+}
+
+/*
  * What the segments did of a node (cdbexplain_showExecStats()): its memory
  * and the coordinator's, under explain_memory_verbosity = detail -- a
  * gather of the planner's route has both, Cloudberry's Gather Motion and
@@ -1751,6 +1828,9 @@ print_node_statistics(PlanState *ps, ExplainState *es)
 		return;
 	ns = &q->stats[id];
 	segs = ns->frag != NULL ? ns->frag : ns->stmt;
+
+	if (ns->frag != NULL && IsA(ps, SortState))
+		print_sort_methods(ns->frag, nsegs, es);
 
 	if (q->options & GP_EXPLAIN_MEMORY)
 	{
