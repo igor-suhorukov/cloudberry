@@ -3623,6 +3623,23 @@ COMMIT;"
 		*) notok "a function reading a table on a segment" "$out" ;;
 	esac
 
+	# Nor make or drop an object there, which the planner hook cannot refuse:
+	# a utility statement never reaches it.  A function of DDL alone ran on
+	# each segment it was called on, and committed, that segment's catalog
+	# then out of step with the coordinator's (dml_in_udf).
+	q 0 "CREATE FUNCTION ddl_o(x int) RETURNS int LANGUAGE plpgsql AS \$\$ BEGIN DROP TABLE IF EXISTS ddl_t; CREATE TABLE ddl_t (a int); RETURN x; END \$\$;" >/dev/null
+	out=$(printf '%s\n' "SET gp.optimizer_trace_fallback = on;" "SELECT a, ddl_o(a) FROM o WHERE a < 3;" | qf 0)
+	out2=$(q 0 "SELECT count(*) FROM gp_dist_random('pg_class') WHERE relname = 'ddl_t';")
+	case "$out" in
+		*"fallback"*) notok "a function's DDL in a fragment" "$out" ;;
+		*"function cannot execute on a QE slice because it issues a non-SELECT statement"*)
+			[ "$out2" = 0 ] \
+				&& ok "a function in a fragment may not make or drop a table on its segment alone" \
+				|| notok "a function's DDL in a fragment" "$out / ddl_t on $out2 segments" ;;
+		*) notok "a function's DDL in a fragment" "$out / ddl_t on $out2 segments" ;;
+	esac
+	q 0 "DROP FUNCTION ddl_o(int);" >/dev/null
+
 	# A node tree and extended statistics refuse to be read back by input or
 	# receive; they travel as text and bytea, whose bytes they are.
 	q 0 "CREATE TABLE ntp (a int, b int) DISTRIBUTED BY (a) PARTITION BY RANGE (b) (START (1) END (3) EVERY (1));" >/dev/null

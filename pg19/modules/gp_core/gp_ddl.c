@@ -131,9 +131,11 @@
 #include "gp_foreign.h"
 #include "gp_label.h"
 #include "gp_loopback.h"
+#include "gp_motion.h"
 #include "gp_policy.h"
 #include "gp_refresh.h"
 #include "gp_scan.h"
+#include "gp_settings.h"
 
 /*
  * What a dispatched statement's text starts with.  Only a dispatched backend
@@ -1900,6 +1902,25 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	if (recording || GpClusterBackendRole() != GP_ROLE_DISPATCH)
 	{
 		RangeVar   *staging;
+
+		/*
+		 * A utility statement a function runs while this segment carries out
+		 * a fragment -- its share of a statement ORCA planned, in which the
+		 * function was called -- would make, drop or change an object on this
+		 * segment alone, and a function that did only that would commit with
+		 * the segments' catalogs out of step with the coordinator's.
+		 * Cloudberry's QE refuses every statement but a SELECT in a function
+		 * (querytree_safe_for_qe()), and so does the port's planner hook for
+		 * a query (gp_motion.c), which a utility statement never reaches:
+		 * refused here, with Cloudberry's words, but where
+		 * gp.allow_segment_dml allows it, as Cloudberry's allow_segment_DML
+		 * does.
+		 */
+		if (GpClusterIsDispatched() && GpMotionInFragment() &&
+			!gp_allow_segment_dml)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("function cannot execute on a QE slice because it issues a non-SELECT statement")));
 
 		if (GpClusterBackendRole() == GP_ROLE_EXECUTE &&
 			IsA(parsetree, CopyStmt) &&

@@ -237,6 +237,12 @@ extern bool GpMotionShareFileSet(PlannedStmt *stmt, struct FileSet *fileset);
 extern bool GpMotionIsFragment(PlannedStmt *stmt);
 
 /*
+ * Is this segment process carrying out a fragment now, which a function it
+ * runs is called from (gp_ddl.c)?
+ */
+extern bool GpMotionInFragment(void);
+
+/*
  * Can a parallel retrieve cursor's top slice, below this Gather, run on
  * readers of the segments -- its endpoints -- rather than the writers
  * (gp_endpoint.c)?

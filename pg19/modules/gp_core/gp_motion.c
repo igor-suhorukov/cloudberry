@@ -5342,6 +5342,17 @@ fragment_safe_walker(Node *node, void *context)
 	return expression_tree_walker(node, fragment_safe_walker, context);
 }
 
+/*
+ * Is a fragment being carried out in this segment process -- and so whatever
+ * a function runs, run inside one?  A utility statement never reaches the
+ * planner hook below, and gp_ddl.c refuses it as the hook refuses a query.
+ */
+bool
+GpMotionInFragment(void)
+{
+	return fragment_depth > 0;
+}
+
 static PlannedStmt *
 motion_planner(Query *parse, const char *query_string, int cursorOptions,
 			   ParamListInfo boundParams, ExplainState *es)
