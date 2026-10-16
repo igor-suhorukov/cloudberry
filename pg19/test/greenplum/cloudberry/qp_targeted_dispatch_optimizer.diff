@@ -1,0 +1,140 @@
+@@
+-INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
++INFO:  (slice 0) Dispatch command to SINGLE content
+@@
+-INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
++INFO:  (slice 0) Dispatch command to SINGLE content
+@@
+-INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
++INFO:  (slice 0) Dispatch command to SINGLE content
+@@
+-INFO:  Distributed transaction command 'Distributed Prepare' to ALL contents: 2 0 1
+-INFO:  Distributed transaction command 'Distributed Commit Prepared' to ALL contents: 2 0 1
++INFO:  Distributed transaction command 'Distributed Commit (one-phase)' to ALL contents: 2 0 1
+@@
+-INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
++INFO:  (slice 0) Dispatch command to SINGLE content
+@@
++INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
++INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
+@@
+-INFO:  Distributed transaction command 'Distributed Prepare' to ALL contents: 0 1 2
+-INFO:  Distributed transaction command 'Distributed Commit Prepared' to ALL contents: 0 1 2
++INFO:  Distributed transaction command 'Distributed Commit (one-phase)' to ALL contents: 0 1 2
+@@
++INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
++INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
+@@
++INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
++INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
+@@
++INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
++INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
+@@
++INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
++INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
+@@
++INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
++INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
+@@
++INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
++INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
+@@
++INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
++INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
+@@
+-INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
++INFO:  (slice 1) Dispatch command to SINGLE content
+@@
+-INFO:  Distributed transaction command 'Distributed Prepare' to ALL contents: 0 1 2
+-INFO:  Distributed transaction command 'Distributed Commit Prepared' to ALL contents: 0 1 2
+-insert into bytea values ('e','0.0.1.0');
++INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+@@
++insert into bytea values ('e','0.0.1.0');
++INFO:  (slice 0) Dispatch command to SINGLE content
++INFO:  Distributed transaction command 'Distributed Commit (one-phase)' to SINGLE content
+@@
++INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
++INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
+@@
+-INFO:  Distributed transaction command 'Distributed Prepare' to ALL contents: 0 1 2
+-INFO:  Distributed transaction command 'Distributed Commit Prepared' to ALL contents: 0 1 2
+-insert into inetmac values ('0.0.0.2','AA:AA:AA:AA:AA:AC');
++INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+@@
++insert into inetmac values ('0.0.0.2','AA:AA:AA:AA:AA:AC');
++INFO:  (slice 0) Dispatch command to SINGLE content
++INFO:  Distributed transaction command 'Distributed Commit (one-phase)' to SINGLE content
+@@
++INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
++INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
+@@
+-INFO:  Distributed transaction command 'Distributed Prepare' to ALL contents: 0 1 2
+-INFO:  Distributed transaction command 'Distributed Commit Prepared' to ALL contents: 0 1 2
+-insert into time2 values ('00:00:00+1352', 'abcd');
++INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+@@
++insert into time2 values ('00:00:00+1352', 'abcd');
++INFO:  (slice 0) Dispatch command to SINGLE content
++INFO:  Distributed transaction command 'Distributed Commit (one-phase)' to SINGLE content
+@@
++INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
++INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
+@@
+-INFO:  Distributed transaction command 'Distributed Prepare' to ALL contents: 0 1 2
+-INFO:  Distributed transaction command 'Distributed Commit Prepared' to ALL contents: 0 1 2
+-insert into timestamp values ('2004-12-13 01:51:25','2004-12-12 01:51:15+1359');
++INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+@@
++insert into timestamp values ('2004-12-13 01:51:25','2004-12-12 01:51:15+1359');
++INFO:  (slice 0) Dispatch command to SINGLE content
++INFO:  Distributed transaction command 'Distributed Commit (one-phase)' to SINGLE content
+@@
++INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
++INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
+@@
+-INFO:  Distributed transaction command 'Distributed Prepare' to ALL contents: 0 1 2
+-INFO:  Distributed transaction command 'Distributed Commit Prepared' to ALL contents: 0 1 2
+-insert into bit1 values ('0', 24);
++INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+@@
++insert into bit1 values ('0', 24);
++INFO:  (slice 0) Dispatch command to SINGLE content
++INFO:  Distributed transaction command 'Distributed Commit (one-phase)' to SINGLE content
+@@
+-INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+-INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
+-INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+-INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
+-INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+-INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
+-INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+-INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
+-INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+-INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
+-INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+-INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
+-INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+-INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
+@@
++INFO:  (slice 2) Dispatch command to SINGLE content
++INFO:  (slice 3) Dispatch command to SINGLE content
++INFO:  (slice 4) Dispatch command to SINGLE content
+@@
+-INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+@@
+-INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+@@
+-INFO:  Distributed transaction command 'Distributed Prepare' to ALL contents: 0 1 2
+-INFO:  Distributed transaction command 'Distributed Commit Prepared' to ALL contents: 0 1 2
++INFO:  Distributed transaction command 'Distributed Commit (one-phase)' to ALL contents: 0 1 2
+@@
+-INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+@@
+-INFO:  Distributed transaction command 'Distributed Prepare' to ALL contents: 0 1 2
+-INFO:  Distributed transaction command 'Distributed Commit Prepared' to ALL contents: 0 1 2
++INFO:  Distributed transaction command 'Distributed Commit (one-phase)' to ALL contents: 0 1 2
+@@
++INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
++INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2

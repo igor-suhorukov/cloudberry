@@ -1,0 +1,78 @@
+@@
++DETAIL:  It depends on temporary table point_tbl.
+@@
+-INFO:  index "reindex_verbose_pkey" was reindexed
+-INFO:  index "reindex_verbose_pkey" was reindexed
+-INFO:  index "reindex_verbose_pkey" was reindexed
+@@
++ materialized view concur_reindex_matview | access method pax                                          | n
+@@
++ table concur_reindex_tab                 | access method pax                                          | n
+@@
+-(8 rows)
++(10 rows)
+@@
++ materialized view concur_reindex_matview | access method pax                                          | n
+@@
++ table concur_reindex_tab                 | access method pax                                          | n
+@@
+-(8 rows)
++(10 rows)
+@@
++ table concur_reindex_part_0_1            | access method pax                          | n
+@@
++ table concur_reindex_part_0_2            | access method pax                          | n
+@@
+-(19 rows)
++(21 rows)
+@@
++ table concur_reindex_part_0_1            | access method pax                          | n
+@@
++ table concur_reindex_part_0_2            | access method pax                          | n
+@@
+-(19 rows)
++(21 rows)
+@@
+-ERROR:  "concur_reindex_part_index" is not a table, directory table or materialized view
++ERROR:  "concur_reindex_part_index" is not a table or materialized view
+@@
+-ERROR:  "concur_reindex_part_index" is not a table, directory table or materialized view
++ERROR:  "concur_reindex_part_index" is not a table or materialized view
+@@
+-ERROR:  "concur_reindex_part_index_10" is not a table, directory table or materialized view
++ERROR:  "concur_reindex_part_index_10" is not a table or materialized view
+@@
+-ERROR:  "concur_reindex_part_index_10" is not a table, directory table or materialized view
++ERROR:  "concur_reindex_part_index_10" is not a table or materialized view
+@@
+-ERROR:  cannot reindex system catalogs concurrently
++ERROR:  relation "pg_toast.pg_toast_1260" does not exist
+@@
+-ERROR:  cannot reindex system catalogs concurrently
++ERROR:  relation "pg_toast.pg_toast_1260_index" does not exist
+@@
+-    TABLE "concur_reindex_tab2" CONSTRAINT "concur_reindex_tab2_c1_fkey" FOREIGN KEY (c1) REFERENCES concur_reindex_tab(c1)
++    TABLE "concur_reindex_tab2" CONSTRAINT "concur_reindex_tab2_c1_fkey" FOREIGN KEY (c1) REFERENCES concur_reindex_tab(c1) NOT ENFORCED
+@@
+- concur_exprs_index_expr   |      1 |            -1
++ concur_exprs_index_expr   |      1 |              
+@@
+- concur_exprs_index_pred   |      1 |            -1
+- concur_exprs_index_pred_2 |      1 |            -1
+- concur_exprs_index_pred_2 |      2 |            -1
++ concur_exprs_index_pred   |      1 |              
++ concur_exprs_index_pred_2 |      1 |              
++ concur_exprs_index_pred_2 |      2 |              
+@@
++ERROR:  schema "pg_temp_N" does not exist
+@@
++ reindex_before   | r       | relfilenode is unchanged
+@@
+-(10 rows)
++(11 rows)
+@@
+-ERROR:  must be owner of table pg_toast_1260
++ERROR:  relation "pg_toast.pg_toast_1260" does not exist
+@@
+-ERROR:  must be owner of index pg_toast_1260_index
++ERROR:  relation "pg_toast.pg_toast_1260_index" does not exist

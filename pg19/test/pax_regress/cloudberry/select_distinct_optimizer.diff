@@ -1,0 +1,4 @@
+@@
++ERROR:  unrecognized configuration parameter "gp_statistics_pullup_from_child_partition"
+@@
++ERROR:  unrecognized configuration parameter "gp_statistics_pullup_from_child_partition"

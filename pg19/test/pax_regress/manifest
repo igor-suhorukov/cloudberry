@@ -508,7 +508,7 @@ run  nested_case_null
 run  sort
 run  aggregate_with_groupingsets
 skip gporca  table row type and query-specified row type do not match; could not find hash function for hash operator
-run  gporca_faults
+run  gporca_faults  planner  as ../greenplum/manifest says of Cloudberry's own copy: under ORCA its two faults in ORCA are none of the port's ORCA's
 run  rpt_tpch
 skip bfv_planner  differs: two counts of what its plans read are 27 and 9, where Cloudberry's are 33 and 11
 run  bfv_legacy

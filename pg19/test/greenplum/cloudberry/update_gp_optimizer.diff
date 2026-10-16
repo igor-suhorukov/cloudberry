@@ -1,0 +1,7 @@
+@@
+-ERROR:  can't split update for inherit table:
++QUERY PLAN
++___________
++
+@@
+-ERROR:  can't split update for inherit table:

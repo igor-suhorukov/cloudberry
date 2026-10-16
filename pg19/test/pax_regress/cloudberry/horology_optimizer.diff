@@ -1,0 +1,27 @@
+@@
+-HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
++DETAIL:  No operator of that name accepts the given argument types.
++HINT:  You might need to add explicit type casts.
+@@
+-        out of range         
+------------------------------
+- Mon Aug 16 00:00:00 4560 BC
+-(1 row)
+-
++ERROR:  timestamp out of range
+@@
+-ERROR:  formatting field "TZ" is only supported in to_char
++         to_timestamp         
++------------------------------
++ Sun Dec 18 11:38:00 2011 PST
++(1 row)
++
+@@
++ERROR:  hour "15" is invalid for the 12-hour clock
+@@
+-WARNING:  hour "15" is invalid for the 12-hour clock
+-         to_timestamp         
+-------------------------------
+- Mon Jun 13 15:50:55 2016 PDT
+-(1 row)
+-

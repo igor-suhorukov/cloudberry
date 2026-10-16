@@ -1,0 +1,17 @@
+@@
++NOTICE:  using default RANDOM distribution since no distribution was specified
+@@
++NOTICE:  using default RANDOM distribution since no distribution was specified
+@@
++NOTICE:  using default RANDOM distribution since no distribution was specified
+@@
++NOTICE:  using default RANDOM distribution since no distribution was specified
+@@
+- distpol_ctas1 | 
+- distpol_ctas2 | 
+- distpol_ctas3 | 
+- distpol_ctas4 | 
++ distpol_ctas1 | 2
++ distpol_ctas2 | 1
++ distpol_ctas3 | 1
++ distpol_ctas4 | 2 3

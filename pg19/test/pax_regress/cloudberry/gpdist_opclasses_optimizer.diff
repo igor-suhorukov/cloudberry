@@ -1,0 +1,10 @@
+@@
+-DETAIL:  Distribution key column "ip_addr" is not included in the constraint.
+-ERROR:  exclusion constraint is not compatible with the table's distribution policy
+-HINT:  Add "ip_addr" to the constraint with the =(inet,inet) operator.
++ERROR:  pax only support btree/hash/gin/bitmap indexes
+@@
+-DETAIL:  Distribution key column "ip_addr" is not included in the constraint.
+-ERROR:  exclusion constraint is not compatible with the table's distribution policy
+-HINT:  Add "ip_addr" to the constraint with the =(inet,inet) operator.
++ERROR:  pax only support btree/hash/gin/bitmap indexes

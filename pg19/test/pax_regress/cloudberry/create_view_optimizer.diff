@@ -1,0 +1,47 @@
+@@
++DETAIL:  It depends on temporary table temp_table.
+@@
++DETAIL:  It depends on temporary table temp_table.
+@@
++LINE 2:     CREATE TEMP VIEW testview AS SELECT 1;
++                             ^
+@@
++DETAIL:  It depends on temporary table temp_table.
+@@
++DETAIL:  It depends on temporary table temp_table.
+@@
++DETAIL:  It depends on temporary table temp_table.
+@@
++DETAIL:  It depends on temporary table temp_table.
+@@
++DETAIL:  It depends on temporary table temp_table.
+@@
++DETAIL:  It depends on temporary table temp_table.
+@@
++DETAIL:  It depends on temporary view v7_temp.
+@@
++DETAIL:  It depends on temporary view v10_temp.
+@@
++DETAIL:  It depends on temporary view v11_temp.
+@@
++DETAIL:  It depends on temporary sequence seq1_temp.
+@@
++DETAIL:  It depends on temporary table tt.
+@@
++DETAIL:  It depends on temporary table tt.
+@@
++DETAIL:  It depends on temporary table tt.
+@@
++DETAIL:  It depends on temporary table tt.
+@@
++DETAIL:  It depends on temporary table tmptbl.
+@@
+-DETAIL:  rule _RETURN on view tt14v depends on column "f4"
++DETAIL:  rule _RETURN on view tt14v depends on column "f4".
+@@
+-HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
++DETAIL:  No operator of that name accepts the given argument types.
++HINT:  You might need to add explicit type casts.
+@@
+-     x > y OR (y > z AND NOT x > z) AS c9,         +
++     x > y OR y > z AND NOT x > z AS c9,           +

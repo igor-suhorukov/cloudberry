@@ -1,0 +1,8 @@
+@@
+-ERROR:  could not determine row type for result of jsonb_populate_record
+-HINT:  Provide a non-null record argument, or call the function in the FROM clause using a column definition list.
++  x  | y 
++-----+---
++ 776 |  
++(1 row)
++

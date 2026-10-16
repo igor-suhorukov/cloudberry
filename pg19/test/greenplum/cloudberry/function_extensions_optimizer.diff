@@ -1,0 +1,68 @@
+@@
+- relname |    attname    | attlen 
+----------+---------------+--------
+- pg_proc | prodataaccess |      1
+-(1 row)
++ relname | attname | attlen 
++---------+---------+--------
++(0 rows)
+@@
+-ERROR:  function with EXECUTE ON restrictions cannot be used in the SELECT list of a query with FROM
++ srf_on_coordinator 
++--------------------
++ bar -1
++ bar -1
++ bar -1
++ foo -1
++ foo -1
++ foo -1
++(6 rows)
++
+@@
+-ERROR:  function with EXECUTE ON restrictions cannot be used in the SELECT list of a query with FROM
++ srf_on_master 
++---------------
++ bar -1
++ bar -1
++ bar -1
++ foo -1
++ foo -1
++ foo -1
++(6 rows)
++
+@@
+-                                                                                             List of functions
+- Schema |   Name   | Result data type | Argument data types | Type | Data access | Execute on | Volatility | Parallel |    Owner    | Security | Access privileges | Language | Internal name | Description 
+---------+----------+------------------+---------------------+------+-------------+------------+------------+----------+-------------+----------+-------------------+----------+---------------+-------------
+- public | test_srf | SETOF text       |                     | func | no sql      | any        | immutable  | unsafe   | srftestuser | invoker  |                   | plpgsql  |               | 
++                                                                                      List of functions
++ Schema |   Name   | Result data type | Argument data types | Type | Volatility | Parallel |    Owner    | Security | Leakproof? | Access privileges | Language | Internal name | Description 
++--------+----------+------------------+---------------------+------+------------+----------+-------------+----------+------------+-------------------+----------+---------------+-------------
++ public | test_srf | SETOF text       |                     | func | immutable  | unsafe   | srftestuser | invoker  | no         |                   | plpgsql  |               | 
+@@
+-                                                                                              List of functions
+- Schema |   Name   | Result data type | Argument data types | Type | Data access | Execute on  | Volatility | Parallel |    Owner    | Security | Access privileges | Language | Internal name | Description 
+---------+----------+------------------+---------------------+------+-------------+-------------+------------+----------+-------------+----------+-------------------+----------+---------------+-------------
+- public | test_srf | SETOF text       |                     | func | no sql      | coordinator | immutable  | unsafe   | srftestuser | invoker  |                   | plpgsql  |               | 
++                                                                                      List of functions
++ Schema |   Name   | Result data type | Argument data types | Type | Volatility | Parallel |    Owner    | Security | Leakproof? | Access privileges | Language | Internal name | Description 
++--------+----------+------------------+---------------------+------+------------+----------+-------------+----------+------------+-------------------+----------+---------------+-------------
++ public | test_srf | SETOF text       |                     | func | immutable  | unsafe   | srftestuser | invoker  | no         |                   | plpgsql  |               | 
+@@
+-                                                                                              List of functions
+- Schema |   Name   | Result data type | Argument data types | Type | Data access |  Execute on  | Volatility | Parallel |    Owner    | Security | Access privileges | Language | Internal name | Description 
+---------+----------+------------------+---------------------+------+-------------+--------------+------------+----------+-------------+----------+-------------------+----------+---------------+-------------
+- public | test_srf | SETOF text       |                     | func | no sql      | all segments | immutable  | unsafe   | srftestuser | invoker  |                   | plpgsql  |               | 
++                                                                                      List of functions
++ Schema |   Name   | Result data type | Argument data types | Type | Volatility | Parallel |    Owner    | Security | Leakproof? | Access privileges | Language | Internal name | Description 
++--------+----------+------------------+---------------------+------+------------+----------+-------------+----------+------------+-------------------+----------+---------------+-------------
++ public | test_srf | SETOF text       |                     | func | immutable  | unsafe   | srftestuser | invoker  | no         |                   | plpgsql  |               | 
+@@
+-                                                                                             List of functions
+- Schema |   Name   | Result data type | Argument data types | Type | Data access | Execute on | Volatility | Parallel |    Owner    | Security | Access privileges | Language | Internal name | Description 
+---------+----------+------------------+---------------------+------+-------------+------------+------------+----------+-------------+----------+-------------------+----------+---------------+-------------
+- public | test_srf | SETOF text       |                     | func | no sql      | any        | immutable  | unsafe   | srftestuser | invoker  |                   | plpgsql  |               | 
++                                                                                      List of functions
++ Schema |   Name   | Result data type | Argument data types | Type | Volatility | Parallel |    Owner    | Security | Leakproof? | Access privileges | Language | Internal name | Description 
++--------+----------+------------------+---------------------+------+------------+----------+-------------+----------+------------+-------------------+----------+---------------+-------------
++ public | test_srf | SETOF text       |                     | func | immutable  | unsafe   | srftestuser | invoker  | no         |                   | plpgsql  |               | 

@@ -1,0 +1,4 @@
+@@
+-HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
++DETAIL:  No operator of that name accepts the given argument types.
++HINT:  You might need to add explicit type casts.

@@ -1,0 +1,45 @@
+@@
+-INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
+-DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: ROW EXPRESSION
+@@
+-INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
+-DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: ROW EXPRESSION
+@@
+-INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
+-DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: ROW EXPRESSION
+@@
+-INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
+-DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: ROW EXPRESSION
+@@
+-INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
+-DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: ROW EXPRESSION
+@@
+-INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
+-DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: ROW EXPRESSION
+@@
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: ROW EXPRESSION
+@@
++INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
++DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: ROW EXPRESSION
+@@
+-INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
+-DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: ROW EXPRESSION
+@@
+-INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
+-DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: ROW EXPRESSION
+@@
+-INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
+-DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: ROW EXPRESSION
+@@
+-INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
+-DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: ROW EXPRESSION
+@@
+-INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
+-DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: ROW EXPRESSION
+@@
+-INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
+-DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: ROW EXPRESSION
+@@
+-DETAIL:  There is a column named "q2" in table "*SELECT* 2", but it cannot be referenced from this part of the query.
++DETAIL:  There is a column named "q2" in table "unnamed_subquery", but it cannot be referenced from this part of the query.

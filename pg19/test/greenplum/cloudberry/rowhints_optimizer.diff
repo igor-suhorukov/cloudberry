@@ -1,0 +1,7 @@
+@@
++                           ->  Seq Scan on our_table_1_prt_p1_1 t3_1  (cost=xxx..xxx rows=34 width=xxx)
++                           ->  Seq Scan on our_table_1_prt_p1_2 t3_2  (cost=xxx..xxx rows=34 width=xxx)
++                           ->  Seq Scan on our_table_1_prt_p1_3 t3_3  (cost=xxx..xxx rows=34 width=xxx)
++                           ->  Seq Scan on our_table_1_prt_p1_4 t3_4  (cost=xxx..xxx rows=34 width=xxx)
++                           ->  Seq Scan on our_table_1_prt_p1_5 t3_5  (cost=xxx..xxx rows=34 width=xxx)
++                           ->  Seq Scan on our_table_1_prt_p1_6 t3_6  (cost=xxx..xxx rows=34 width=xxx)

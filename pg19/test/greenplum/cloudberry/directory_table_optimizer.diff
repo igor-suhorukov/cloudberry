@@ -1,0 +1,593 @@
+@@
+-                                    Table "pg_catalog.pg_tablespace"
+-      Column       |   Type    | Collation | Nullable | Default | Storage  | Stats target | Description 
+--------------------+-----------+-----------+----------+---------+----------+--------------+-------------
+- oid               | oid       |           | not null |         | plain    |              | 
+- spcacl            | aclitem[] |           |          |         | extended |              | 
+- spcfilehandlerbin | text      | C         |          |         | extended |              | 
+- spcfilehandlersrc | text      | C         |          |         | extended |              | 
+- spcname           | name      |           | not null |         | plain    |              | 
+- spcoptions        | text[]    | C         |          |         | extended |              | 
+- spcowner          | oid       |           | not null |         | plain    |              | 
++                                Table "pg_catalog.pg_tablespace"
++   Column   |   Type    | Collation | Nullable | Default | Storage  | Stats target | Description 
++------------+-----------+-----------+----------+---------+----------+--------------+-------------
++ oid        | oid       |           | not null |         | plain    |              | 
++ spcacl     | aclitem[] |           |          |         | extended |              | 
++ spcname    | name      |           | not null |         | plain    |              | 
++ spcoptions | text[]    | C         |          |         | extended |              | 
++ spcowner   | oid       |           | not null |         | plain    |              | 
+@@
++Not-null constraints:
++    "pg_tablespace_oid_not_null" NOT NULL "oid"
+@@
+-                            Table "pg_catalog.pg_directory_table"
+-    Column    | Type | Collation | Nullable | Default | Storage  | Stats target | Description 
+---------------+------+-----------+----------+---------+----------+--------------+-------------
+- dtlocation   | text | C         |          |         | extended |              | 
+- dtrelid      | oid  |           | not null |         | plain    |              | 
+- dttablespace | oid  |           | not null |         | plain    |              | 
+-Indexes:
+-    "pg_directory_table_relid_index" PRIMARY KEY, btree (dtrelid)
++                     View "pg_catalog.pg_directory_table"
++    Column    | Type | Collation | Nullable | Default | Storage  | Description 
++--------------+------+-----------+----------+---------+----------+-------------
++ dtlocation   | text |           |          |         | extended | 
++ dtrelid      | oid  |           |          |         | plain    | 
++ dttablespace | oid  |           |          |         | plain    | 
++View definition:
++ SELECT c.oid AS dtrelid,
++        CASE c.reltablespace
++            WHEN 0 THEN ( SELECT d.dattablespace
++               FROM pg_database d
++              WHERE d.datname = current_database())
++            ELSE c.reltablespace
++        END AS dttablespace,
++    l.location AS dtlocation
++   FROM pg_class c
++     CROSS JOIN LATERAL gp_sql.directory_table_location(c.oid::regclass) l(location)
++  WHERE c.relkind = 'r'::"char" AND l.location IS NOT NULL;
+@@
+-                              Table "pg_catalog.gp_storage_server"
+-   Column   |   Type    | Collation | Nullable | Default | Storage  | Stats target | Description 
+-------------+-----------+-----------+----------+---------+----------+--------------+-------------
+- oid        | oid       |           | not null |         | plain    |              | 
+- srvacl     | aclitem[] |           |          |         | extended |              | 
+- srvname    | name      |           | not null |         | plain    |              | 
+- srvoptions | text[]    | C         |          |         | extended |              | 
+- srvowner   | oid       |           | not null |         | plain    |              | 
+-Indexes:
+-    "gp_storage_server_oid_index" PRIMARY KEY, btree (oid), tablespace "pg_global"
+-    "gp_storage_server_name_index" UNIQUE CONSTRAINT, btree (srvname), tablespace "pg_global"
+-Tablespace: "pg_global"
++                       View "pg_catalog.gp_storage_server"
++   Column   |   Type    | Collation | Nullable | Default | Storage  | Description 
++------------+-----------+-----------+----------+---------+----------+-------------
++ oid        | oid       |           |          |         | plain    | 
++ srvacl     | aclitem[] |           |          |         | extended | 
++ srvname    | name      |           |          |         | plain    | 
++ srvoptions | text[]    |           |          |         | extended | 
++ srvowner   | oid       |           |          |         | plain    | 
++View definition:
++ SELECT NULL::oid AS oid,
++    servername AS srvname,
++    to_regrole(serverowner::text)::oid AS srvowner,
++    NULL::aclitem[] AS srvacl,
++    options AS srvoptions
++   FROM gp_sql.storage_server_rows() s(servername, serverowner, options);
+@@
+-                         Table "pg_catalog.gp_storage_user_mapping"
+-  Column   |  Type  | Collation | Nullable | Default | Storage  | Stats target | Description 
+------------+--------+-----------+----------+---------+----------+--------------+-------------
+- oid       | oid    |           | not null |         | plain    |              | 
+- umoptions | text[] | C         |          |         | extended |              | 
+- umserver  | oid    |           | not null |         | plain    |              | 
+- umuser    | oid    |           | not null |         | plain    |              | 
+-Indexes:
+-    "gp_storage_user_mapping_oid_index" PRIMARY KEY, btree (oid), tablespace "pg_global"
+-    "gp_storage_user_mapping_server_index" UNIQUE CONSTRAINT, btree (umuser, umserver), tablespace "pg_global"
+-Tablespace: "pg_global"
++                  View "pg_catalog.gp_storage_user_mapping"
++  Column   |  Type  | Collation | Nullable | Default | Storage  | Description 
++-----------+--------+-----------+----------+---------+----------+-------------
++ oid       | oid    |           |          |         | plain    | 
++ umoptions | text[] |           |          |         | extended | 
++ umserver  | oid    |           |          |         | plain    | 
++ umuser    | oid    |           |          |         | plain    | 
++View definition:
++ SELECT NULL::oid AS oid,
++    COALESCE(to_regrole(username::text)::oid, 0::oid) AS umuser,
++    NULL::oid AS umserver,
++    options AS umoptions
++   FROM gp_sql.storage_user_mapping_rows() m(servername, username, options);
+@@
+- pg_directory_table | f           | p              | r
++ pg_directory_table | f           | p              | v
+@@
+- gp_storage_server | t           | p              | r
++ gp_storage_server | f           | p              | v
+@@
+- gp_storage_user_mapping | t           | p              | r
++ gp_storage_user_mapping | f           | p              | v
+@@
+-                            Table "pg_catalog.pg_directory_table"
+-    Column    | Type | Collation | Nullable | Default | Storage  | Stats target | Description 
+---------------+------+-----------+----------+---------+----------+--------------+-------------
+- dtlocation   | text | C         |          |         | extended |              | 
+- dtrelid      | oid  |           | not null |         | plain    |              | 
+- dttablespace | oid  |           | not null |         | plain    |              | 
+-Indexes:
+-    "pg_directory_table_relid_index" PRIMARY KEY, btree (dtrelid)
++                     View "pg_catalog.pg_directory_table"
++    Column    | Type | Collation | Nullable | Default | Storage  | Description 
++--------------+------+-----------+----------+---------+----------+-------------
++ dtlocation   | text |           |          |         | extended | 
++ dtrelid      | oid  |           |          |         | plain    | 
++ dttablespace | oid  |           |          |         | plain    | 
++View definition:
++ SELECT c.oid AS dtrelid,
++        CASE c.reltablespace
++            WHEN 0 THEN ( SELECT d.dattablespace
++               FROM pg_database d
++              WHERE d.datname = current_database())
++            ELSE c.reltablespace
++        END AS dttablespace,
++    l.location AS dtlocation
++   FROM pg_class c
++     CROSS JOIN LATERAL gp_sql.directory_table_location(c.oid::regclass) l(location)
++  WHERE c.relkind = 'r'::"char" AND l.location IS NOT NULL;
+@@
+-                              Table "pg_catalog.gp_storage_server"
+-   Column   |   Type    | Collation | Nullable | Default | Storage  | Stats target | Description 
+-------------+-----------+-----------+----------+---------+----------+--------------+-------------
+- oid        | oid       |           | not null |         | plain    |              | 
+- srvacl     | aclitem[] |           |          |         | extended |              | 
+- srvname    | name      |           | not null |         | plain    |              | 
+- srvoptions | text[]    | C         |          |         | extended |              | 
+- srvowner   | oid       |           | not null |         | plain    |              | 
+-Indexes:
+-    "gp_storage_server_oid_index" PRIMARY KEY, btree (oid), tablespace "pg_global"
+-    "gp_storage_server_name_index" UNIQUE CONSTRAINT, btree (srvname), tablespace "pg_global"
+-Tablespace: "pg_global"
++                       View "pg_catalog.gp_storage_server"
++   Column   |   Type    | Collation | Nullable | Default | Storage  | Description 
++------------+-----------+-----------+----------+---------+----------+-------------
++ oid        | oid       |           |          |         | plain    | 
++ srvacl     | aclitem[] |           |          |         | extended | 
++ srvname    | name      |           |          |         | plain    | 
++ srvoptions | text[]    |           |          |         | extended | 
++ srvowner   | oid       |           |          |         | plain    | 
++View definition:
++ SELECT NULL::oid AS oid,
++    servername AS srvname,
++    to_regrole(serverowner::text)::oid AS srvowner,
++    NULL::aclitem[] AS srvacl,
++    options AS srvoptions
++   FROM gp_sql.storage_server_rows() s(servername, serverowner, options);
+@@
+-                         Table "pg_catalog.gp_storage_user_mapping"
+-  Column   |  Type  | Collation | Nullable | Default | Storage  | Stats target | Description 
+------------+--------+-----------+----------+---------+----------+--------------+-------------
+- oid       | oid    |           | not null |         | plain    |              | 
+- umoptions | text[] | C         |          |         | extended |              | 
+- umserver  | oid    |           | not null |         | plain    |              | 
+- umuser    | oid    |           | not null |         | plain    |              | 
+-Indexes:
+-    "gp_storage_user_mapping_oid_index" PRIMARY KEY, btree (oid), tablespace "pg_global"
+-    "gp_storage_user_mapping_server_index" UNIQUE CONSTRAINT, btree (umuser, umserver), tablespace "pg_global"
+-Tablespace: "pg_global"
++                  View "pg_catalog.gp_storage_user_mapping"
++  Column   |  Type  | Collation | Nullable | Default | Storage  | Description 
++-----------+--------+-----------+----------+---------+----------+-------------
++ oid       | oid    |           |          |         | plain    | 
++ umoptions | text[] |           |          |         | extended | 
++ umserver  | oid    |           |          |         | plain    | 
++ umuser    | oid    |           |          |         | plain    | 
++View definition:
++ SELECT NULL::oid AS oid,
++    COALESCE(to_regrole(username::text)::oid, 0::oid) AS umuser,
++    NULL::oid AS umserver,
++    options AS umoptions
++   FROM gp_sql.storage_user_mapping_rows() m(servername, username, options);
+@@
+- pg_directory_table | f           | p              | r
++ pg_directory_table | f           | p              | v
+@@
+- gp_storage_server | t           | p              | r
++ gp_storage_server | f           | p              | v
+@@
+- gp_storage_user_mapping | t           | p              | r
++ gp_storage_user_mapping | f           | p              | v
+@@
+-   srvname    | srvacl |                      srvoptions                      
+---------------+--------+------------------------------------------------------
+- oss_server1  |        | 
+- oss_server10 |        | 
+- oss_server11 |        | {protocol=s3av2}
+- oss_server12 |        | {protocol=s3av2,endpoint=127.0.0.1:9000,https=false}
+- oss_server2  |        | {protocal=localhost}
+- oss_server3  |        | {endpoint=127.0.0.1:9000}
+- oss_server4  |        | {https=true}
+- oss_server5  |        | {virtual_host=false}
+- oss_server6  |        | {protocol=qingstor,"endpoint=pek3b,qingstor.com"}
+- oss_server7  |        | {https=false,virtual_host=true}
+- oss_server8  |        | {protocol=hdfs,namenode=127.0.0.1:8020}
+-(11 rows)
++ srvname | srvacl | srvoptions 
++---------+--------+------------
++(0 rows)
+@@
+-   srvname    | srvacl |                      srvoptions                      
+---------------+--------+------------------------------------------------------
+- oss_server1  |        | 
+- oss_server10 |        | 
+- oss_server11 |        | {protocol=s3av2}
+- oss_server12 |        | {protocol=s3av2,endpoint=127.0.0.1:9000,https=false}
+- oss_server2  |        | {protocal=localhost}
+- oss_server3  |        | {endpoint=127.0.0.1:9000}
+- oss_server4  |        | {https=true}
+- oss_server5  |        | {virtual_host=false}
+- oss_server6  |        | {protocol=qingstor,"endpoint=pek3b,qingstor.com"}
+- oss_server7  |        | {https=false,virtual_host=true}
+- oss_server8  |        | {protocol=hdfs,namenode=127.0.0.1:8020}
+-(11 rows)
++ srvname | srvacl | srvoptions 
++---------+--------+------------
++(0 rows)
+@@
+-ERROR:  syntax error at or near "OWNER"
+-LINE 1: ALTER STORAGE SERVER oss_server6 OWNER TO postgres;
+-                                         ^
++ERROR:  role "postgres" does not exist
+@@
+-   srvname    | srvacl |                      srvoptions                      
+---------------+--------+------------------------------------------------------
+- oss_server1  |        | {protocol=aws}
+- oss_server10 |        | 
+- oss_server11 |        | {protocol=s3av2}
+- oss_server12 |        | {protocol=s3av2,endpoint=127.0.0.1:9000,https=false}
+- oss_server2  |        | {protocal=localhost,https=true,virtual_host=true}
+- oss_server3  |        | {endpoint=127.0.0.1:9000}
+- oss_server4  |        | {https=true,protocol=localhost,virtual_host=true}
+- oss_server5  |        | {virtual_host=false}
+- oss_server6  |        | {protocol=qingstor,"endpoint=pek3b,qingstor.com"}
+- oss_server7  |        | {https=false,virtual_host=true}
+- oss_server8  |        | {protocol=hdfs,namenode=127.0.0.1:8020}
+-(11 rows)
++ srvname | srvacl | srvoptions 
++---------+--------+------------
++(0 rows)
+@@
+-   srvname    | srvacl |                      srvoptions                      
+---------------+--------+------------------------------------------------------
+- oss_server1  |        | {protocol=aws}
+- oss_server10 |        | 
+- oss_server11 |        | {protocol=s3av2}
+- oss_server12 |        | {protocol=s3av2,endpoint=127.0.0.1:9000,https=false}
+- oss_server2  |        | {protocal=localhost,https=true,virtual_host=true}
+- oss_server3  |        | {endpoint=127.0.0.1:9000}
+- oss_server4  |        | {https=true,protocol=localhost,virtual_host=true}
+- oss_server5  |        | {virtual_host=false}
+- oss_server6  |        | {protocol=qingstor,"endpoint=pek3b,qingstor.com"}
+- oss_server7  |        | {https=false,virtual_host=true}
+- oss_server8  |        | {protocol=hdfs,namenode=127.0.0.1:8020}
+-(11 rows)
++ srvname | srvacl | srvoptions 
++---------+--------+------------
++(0 rows)
+@@
++ERROR:  user mapping for "gpadmin" already exists for server "oss_server1"
+@@
++NOTICE:  user mapping for "gpadmin" already exists for server "oss_server1", skipping
+@@
++NOTICE:  user mapping for "gpadmin" already exists for server "oss_server1", skipping
+@@
++ERROR:  user mapping for "gpadmin" already exists for server "oss_server2"
+@@
++ERROR:  user mapping for "test_dirtable1" already exists for server "oss_server1"
+@@
++NOTICE:  user mapping for "gpadmin" already exists for server "oss_server1", skipping
+@@
+-                                      umoptions                                      
+--------------------------------------------------------------------------------------
+- {accesskey=EQEJIOJFAKQWESQEJIWQ,secretkey=0ADQiAxcaUJ2lMHipis80hsUEhdiqui82JhduOKE}
+- {accesskey=EQEJIOJFAKQWESQEJIWQ,secretkey=0ADQiAxcaUJ2lMHipis80hsUEhdiqui82JhduOKE}
+- {accesskey=EQEJIOJFAKQWESQEJIWQ,secretkey=7KieQKdu02jHEUEjsqUYE83mx9OE2kdj2SJ72h6H}
+- {accesskey=EQEJIOJFAKQWESQEJIWQ,secretkey=7KieQKdu02jHEUEjsqUYE83mx9OE2kdj2SJ72h6H}
+- {auth_method=simple}
+- {endpoint=127.0.0.1:6555}
+- 
+- 
+-(8 rows)
++ umoptions 
++-----------
++(0 rows)
+@@
+-                                      umoptions                                      
+--------------------------------------------------------------------------------------
+- {accesskey=EQEJIOJFAKQWESQEJIWQ,secretkey=0ADQiAxcaUJ2lMHipis80hsUEhdiqui82JhduOKE}
+- {accesskey=EQEJIOJFAKQWESQEJIWQ,secretkey=0ADQiAxcaUJ2lMHipis80hsUEhdiqui82JhduOKE}
+- {accesskey=EQEJIOJFAKQWESQEJIWQ,secretkey=7KieQKdu02jHEUEjsqUYE83mx9OE2kdj2SJ72h6H}
+- {accesskey=EQEJIOJFAKQWESQEJIWQ,secretkey=7KieQKdu02jHEUEjsqUYE83mx9OE2kdj2SJ72h6H}
+- {auth_method=simple}
+- {endpoint=127.0.0.1:6555}
+- 
+- 
+-(8 rows)
++ umoptions 
++-----------
++(0 rows)
+@@
+-                                               umoptions                                                
+---------------------------------------------------------------------------------------------------------
+- {accesskey=EQEJIOJFAKQWESQEJIWQ,secretkey=0ADQiAxcaUJ2lMHipis80hsUEhdiqui82JhduOKE}
+- {accesskey=EQEJIOJFAKQWESQEJIWQ,secretkey=0ADQiAxcaUJ2lMHipis80hsUEhdiqui82JhduOKE}
+- {accesskey=EQEJIOJFAKQWESQEJIWQ,secretkey=7KieQKdu02jHEUEjsqUYE83mx9OE2kdj2SJ72h6H}
+- {accesskey=EQEJIOJFAKQWESQEJIWQ,secretkey=7KieQKdu02jHEUEjsqUYE83mx9OE2kdj2SJ72h6H}
+- {accesskey=KGFQWEFQQEFXVAEAWLLC,secretkey=0SJIWiIATh6jOlmAKr8DGq6hOAGBI1BnsnvgJmTs,auth_method=simple}
+- {auth_method=simple}
+- {endpoint=127.0.0.1:6555}
+- 
+-(8 rows)
++ umoptions 
++-----------
++(0 rows)
+@@
+-                                               umoptions                                                
+---------------------------------------------------------------------------------------------------------
+- {accesskey=EQEJIOJFAKQWESQEJIWQ,secretkey=0ADQiAxcaUJ2lMHipis80hsUEhdiqui82JhduOKE}
+- {accesskey=EQEJIOJFAKQWESQEJIWQ,secretkey=0ADQiAxcaUJ2lMHipis80hsUEhdiqui82JhduOKE}
+- {accesskey=EQEJIOJFAKQWESQEJIWQ,secretkey=7KieQKdu02jHEUEjsqUYE83mx9OE2kdj2SJ72h6H}
+- {accesskey=EQEJIOJFAKQWESQEJIWQ,secretkey=7KieQKdu02jHEUEjsqUYE83mx9OE2kdj2SJ72h6H}
+- {accesskey=KGFQWEFQQEFXVAEAWLLC,secretkey=0SJIWiIATh6jOlmAKr8DGq6hOAGBI1BnsnvgJmTs,auth_method=simple}
+- {auth_method=simple}
+- {endpoint=127.0.0.1:6555}
+- 
+-(8 rows)
++ umoptions 
++-----------
++(0 rows)
+@@
+-NOTICE:  storage server "no_exist_server" does not exist, skipping
+@@
+-ERROR:  storage server "no_exist_server" does not exist
++ERROR:  server "no_exist_server" does not exist
+@@
+-                                               umoptions                                                
+---------------------------------------------------------------------------------------------------------
+- {accesskey=EQEJIOJFAKQWESQEJIWQ,secretkey=0ADQiAxcaUJ2lMHipis80hsUEhdiqui82JhduOKE}
+- {accesskey=EQEJIOJFAKQWESQEJIWQ,secretkey=7KieQKdu02jHEUEjsqUYE83mx9OE2kdj2SJ72h6H}
+- {accesskey=EQEJIOJFAKQWESQEJIWQ,secretkey=7KieQKdu02jHEUEjsqUYE83mx9OE2kdj2SJ72h6H}
+- {accesskey=KGFQWEFQQEFXVAEAWLLC,secretkey=0SJIWiIATh6jOlmAKr8DGq6hOAGBI1BnsnvgJmTs,auth_method=simple}
+- {auth_method=simple}
+- {endpoint=127.0.0.1:6555}
+-(6 rows)
++ umoptions 
++-----------
++(0 rows)
+@@
+-                                               umoptions                                                
+---------------------------------------------------------------------------------------------------------
+- {accesskey=EQEJIOJFAKQWESQEJIWQ,secretkey=0ADQiAxcaUJ2lMHipis80hsUEhdiqui82JhduOKE}
+- {accesskey=EQEJIOJFAKQWESQEJIWQ,secretkey=7KieQKdu02jHEUEjsqUYE83mx9OE2kdj2SJ72h6H}
+- {accesskey=EQEJIOJFAKQWESQEJIWQ,secretkey=7KieQKdu02jHEUEjsqUYE83mx9OE2kdj2SJ72h6H}
+- {accesskey=KGFQWEFQQEFXVAEAWLLC,secretkey=0SJIWiIATh6jOlmAKr8DGq6hOAGBI1BnsnvgJmTs,auth_method=simple}
+- {auth_method=simple}
+- {endpoint=127.0.0.1:6555}
+-(6 rows)
++ umoptions 
++-----------
++(0 rows)
+@@
+-ERROR:  storage server "oss_server1" cannot be dropped because some objects depend on it
++DETAIL:  user mapping for gpadmin on server oss_server1 depends on server oss_server1
++ERROR:  cannot drop server oss_server1 because other objects depend on it
++HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+@@
+-ERROR:  storage server "oss_server2" cannot be dropped because some objects depend on it
++DETAIL:  user mapping for test_dirtable1 on server oss_server2 depends on server oss_server2
++ERROR:  cannot drop server oss_server2 because other objects depend on it
++HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+@@
+-ERROR:  storage server "oss_server3" cannot be dropped because some objects depend on it
+-storage server of storage user mapping for test_dirtable1 on storage server oss_server3
+-storage server of storage user mapping for test_dirtable2 on storage server oss_server3
++DETAIL:  user mapping for gpadmin on server oss_server3 depends on server oss_server3
++ERROR:  cannot drop server oss_server3 because other objects depend on it
++user mapping for test_dirtable1 on server oss_server3 depends on server oss_server3
++user mapping for test_dirtable2 on server oss_server3 depends on server oss_server3
++HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+@@
+-ERROR:  storage server "oss_server8" cannot be dropped because some objects depend on it
++DETAIL:  user mapping for test_dirtable3 on server oss_server8 depends on server oss_server8
++ERROR:  cannot drop server oss_server8 because other objects depend on it
++HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+@@
+-ERROR:  storage server "oss_server9" not exists
++ERROR:  server "oss_server9" does not exist
+@@
+-   srvname    | srvacl |                      srvoptions                      
+---------------+--------+------------------------------------------------------
+- oss_server1  |        | {protocol=aws}
+- oss_server11 |        | {protocol=s3av2}
+- oss_server12 |        | {protocol=s3av2,endpoint=127.0.0.1:9000,https=false}
+- oss_server2  |        | {protocal=localhost,https=true,virtual_host=true}
+- oss_server3  |        | {endpoint=127.0.0.1:9000}
+- oss_server5  |        | {virtual_host=false}
+- oss_server6  |        | {protocol=qingstor,"endpoint=pek3b,qingstor.com"}
+- oss_server7  |        | {https=false,virtual_host=true}
+- oss_server8  |        | {protocol=hdfs,namenode=127.0.0.1:8020}
+-(9 rows)
++ srvname | srvacl | srvoptions 
++---------+--------+------------
++(0 rows)
+@@
+-   srvname    | srvacl |                      srvoptions                      
+---------------+--------+------------------------------------------------------
+- oss_server1  |        | {protocol=aws}
+- oss_server11 |        | {protocol=s3av2}
+- oss_server12 |        | {protocol=s3av2,endpoint=127.0.0.1:9000,https=false}
+- oss_server2  |        | {protocal=localhost,https=true,virtual_host=true}
+- oss_server3  |        | {endpoint=127.0.0.1:9000}
+- oss_server5  |        | {virtual_host=false}
+- oss_server6  |        | {protocol=qingstor,"endpoint=pek3b,qingstor.com"}
+- oss_server7  |        | {https=false,virtual_host=true}
+- oss_server8  |        | {protocol=hdfs,namenode=127.0.0.1:8020}
+-(9 rows)
++ srvname | srvacl | srvoptions 
++---------+--------+------------
++(0 rows)
+@@
+- abs.dir_table      | f           | p              | d
++ abs.dir_table      | f           | p              | r
+@@
+- dir_table1         | f           | p              | d
++ dir_table1         | f           | p              | r
+@@
+- dir_table2         | f           | p              | d
++ dir_table2         | f           | p              | r
+@@
+- dir_table3         | f           | p              | d
++ dir_table3         | f           | p              | r
+@@
+- dir_table4         | f           | p              | d
++ dir_table4         | f           | p              | r
+@@
+- dir_table5         | f           | p              | d
++ dir_table5         | f           | p              | r
+@@
+- dir_table6         | f           | p              | d
++ dir_table6         | f           | p              | r
+@@
+-                                        Directory table "public.dir_table1"
++                                             Table "public.dir_table1"
+@@
+- relative_path | text                     |           |          |         | extended |              | 
++ relative_path | text                     |           | not null |         | extended |              | 
+@@
++Not-null constraints:
++    "dir_table1_relative_path_not_null" NOT NULL "relative_path"
+@@
+-                                        Directory table "public.dir_table2"
++                                             Table "public.dir_table2"
+@@
+- relative_path | text                     |           |          |         | extended |              | 
++ relative_path | text                     |           | not null |         | extended |              | 
+@@
++Not-null constraints:
++    "dir_table2_relative_path_not_null" NOT NULL "relative_path"
++Tablespace: "directory_tblspc"
+@@
+-                                        Directory table "public.dir_table3"
++                                             Table "public.dir_table3"
+@@
+- relative_path | text                     |           |          |         | extended |              | 
++ relative_path | text                     |           | not null |         | extended |              | 
+@@
++Not-null constraints:
++    "dir_table3_relative_path_not_null" NOT NULL "relative_path"
++Tablespace: "directory_tblspc"
+@@
+- abs.dir_table      | f           | p              | d
++ abs.dir_table      | f           | p              | r
+@@
+- dir_table1         | f           | p              | d
++ dir_table1         | f           | p              | r
+@@
+- dir_table2         | f           | p              | d
++ dir_table2         | f           | p              | r
+@@
+- dir_table3         | f           | p              | d
++ dir_table3         | f           | p              | r
+@@
+- dir_table6         | f           | p              | d
++ dir_table6         | f           | p              | r
+@@
+-                                        Directory table "public.dir_table1"
++                                             Table "public.dir_table1"
+@@
+- relative_path | text                     |           |          |         | extended |              | 
++ relative_path | text                     |           | not null |         | extended |              | 
+@@
++Not-null constraints:
++    "dir_table1_relative_path_not_null" NOT NULL "relative_path"
+@@
+-                                        Directory table "public.dir_table1"
++                                             Table "public.dir_table1"
+@@
+- relative_path | text                     |           |          |         | extended |              | 
++ relative_path | text                     |           | not null |         | extended |              | 
+@@
++Not-null constraints:
++    "dir_table1_relative_path_not_null" NOT NULL "relative_path"
+@@
++ nation.txt    | 2199 | 
+@@
+- nation.txt    | 2199 | 
+@@
+- nation1
++ nation.txt
+@@
+- nation1
++ nation.txt
+@@
++ nation.txt    | 2199 | 
+@@
+- nation.txt    | 2199 | 
+@@
++ nation.txt    | 2199 | 
+@@
+- nation.txt    | 2199 | 
+@@
++ nation.txt    | 2199 | nation_new_tag
+@@
+- nation.txt    | 2199 | nation_new_tag
+@@
+-DETAIL:  This operation is not supported for partitioned indexes.
++DETAIL:  This operation is not supported for directory tables.
+@@
+-DETAIL:  This operation is not supported for partitioned indexes.
++DETAIL:  This operation is not supported for directory tables.
+@@
+-DETAIL:  This operation is not supported for partitioned indexes.
++DETAIL:  This operation is not supported for directory tables.
+@@
+-HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
++DETAIL:  No function of that name accepts the given number of arguments.
+@@
++ nation.txt    | 2199 | nation_new_tag
+@@
+- nation.txt    | 2199 | nation_new_tag
+@@
++DETAIL:  A directory table keeps its files in a directory of its own in the database's directory.
++ERROR:  WITH LOCATION is not supported for a directory table
+@@
+-ERROR:  directory table path "pg_tblspc//test_dirtable" already exists
++DETAIL:  A directory table keeps its files in a directory of its own in the database's directory.
++ERROR:  WITH LOCATION is not supported for a directory table
+@@
++DETAIL:  A directory table keeps its files in a directory of its own in the database's directory.
++ERROR:  WITH LOCATION is not supported for a directory table
+@@
+-     8
++     6
+@@
++NOTICE:  directory table "dir_table_with_location" does not exist, skipping
+@@
++NOTICE:  directory table "dir_table_with_location3" does not exist, skipping
+@@
++NOTICE:  user mapping for "gpadmin" does not exist for server "oss_server2", skipping
+@@
+-NOTICE:  storage server "oss_server4" does not exist, skipping
+@@
++NOTICE:  user mapping for "test_dirtable1" does not exist for server "oss_server1", skipping
+@@
+-NOTICE:  storage server "oss_server4" not exists, skipping
+@@
+-NOTICE:  storage server "oss_server9" not exists, skipping
+@@
+-NOTICE:  storage server "oss_server10" not exists, skipping
+@@
+-NOTICE:  storage server "oss_server13" not exists, skipping
+@@
++invalid command \!rm

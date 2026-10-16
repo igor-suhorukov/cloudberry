@@ -11,6 +11,12 @@ file's here, or exactly one the greenplum suite keeps for the same test of
 Cloudberry's own copy (../../greenplum/cloudberry): of greenplum_schedule's
 tests PAX's copies mostly answer alike.
 
+The ORCA pass compares a test that has an expected output of Cloudberry's
+ORCA, test_optimizer.out -- PAX's copy has 151 -- with that, as the
+greenplum suite's does since 2026-10-16, and a difference from it is
+test_optimizer.diff (../../greenplum/cloudberry/README says how).  Its
+answers of a check a function makes with EXPLAIN are compared there too.
+
 Each difference was read, and is kept for one or more of these reasons.  A
 test whose difference is long, or not the same from run to run, is skipped
 in the manifest instead, with what differs first.
@@ -89,6 +95,30 @@ keeps ADD COLUMN's constant default as PostgreSQL's missing value where
 Cloudberry rewrites the table, and a partitioned table in the middle of a
 hierarchy, given no access method, has none in PostgreSQL 19, where PAX's
 expected output has pax, the default of the cluster it was made on.
+
+What Cloudberry's ORCA does otherwise, in PAX's expected output for it.
+The lines its fallback trace prints of what it declines and the port's
+ORCA plans: DML of a partitioned table, a table the coordinator alone has,
+a function that changes what it reads, an external table's location, a
+ROW expression, an attribute its translator did not find (DML_over_joins,
+gpctas, external_table_persistent_error_log, union, hash_index,
+qp_subquery, qp_with_clause, catcache).  Where a statement goes, as
+test_print_direct_dispatch_info says: a write of one row to the segment it
+hashes to, committed in one phase, and a slice to the segments its
+conditions fix, where Cloudberry's ORCA sends both to every segment and
+prepares them (bfv_dd, bfv_dd_multicolumn, direct_dispatch,
+qp_targeted_dispatch).  A CREATE TABLE AS without DISTRIBUTED BY takes its
+query's key, as the planner's does, where Cloudberry's ORCA makes the
+table random (create_table_distpol, gpdist_legacy_opclasses, bfv_legacy);
+so the UNIQUE index join and privileges make on such a table is taken,
+and the REFRESH ... CONCURRENTLY that wants it runs.  A scalar subquery's
+second row refused in PostgreSQL's words, where Cloudberry's ORCA plans an
+assertion (qp_subquery, qp_union_intersect); a NULL for a NOT NULL domain
+refused by the domain, where Cloudberry's ORCA met the column's constraint
+first (domain); a function reading a distributed table, which the port
+answers and Cloudberry's ORCA refuses, "query plan with multiple segworker
+groups" (rangefuncs).  And plans gpdiff.pl does not read as plans (rpt,
+the header of incremental_sort's).
 
 A finding, kept until it is fixed.  A role that has some of a table's
 columns alone -- privileges' atest5, mtarget, t1 and errtst -- is refused

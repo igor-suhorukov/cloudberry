@@ -1,0 +1,9 @@
+@@
+-         Filter: (b |=| 1)
++               Filter: (b |=| 1)
++               Filter: (b |=| 1)
++         ->  Seq Scan on t1_1_prt_p1 t1_2  (cost=0.00..431.00 rows=1 width=8)
++         ->  Seq Scan on t1_1_prt_p2 t1_1  (cost=0.00..431.00 rows=1 width=8)
+@@
+-(5 rows)
++(8 rows)

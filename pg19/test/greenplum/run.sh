@@ -45,9 +45,11 @@
 # port's plans are ORCA's or the planner's with the port's Motions, and what
 # is compared is the answers -- or exactly a difference in cloudberry/,
 # reviewed and kept.  Two passes, as the singlenode suite has: the planner
-# (gp.optimizer = off) and ORCA.  What gpdiff.pl takes for a plan, and does
-# not compare, is a plan, not a function's answer of what EXPLAIN printed
-# (../explain_only.pl).
+# (gp.optimizer = off) and ORCA -- which compares a test that has an output
+# of Cloudberry's ORCA, x_optimizer.out, with that, as Cloudberry's
+# pg_regress does while the optimizer is on.  What gpdiff.pl takes for a
+# plan, and does not compare, is a plan, not a function's answer of what
+# EXPLAIN printed (../explain_only.pl).
 #
 
 set -u
@@ -475,6 +477,7 @@ cp -rn "$CB/data/." "$WORK/data/"
 make_suite() {
 	local g="$1" SN="$WORK/$1/src/test/regress" i t f src am aoseg suffix a s e
 	mkdir -p "$SN/sql" "$SN/expected" "$WORK/$g/testtablespace"
+	: > "$SN/resultmap.orca"
 	cp "$PGSUITE/sql/test_setup.sql" "$SN/sql/"
 	cp "$PGSUITE/expected/test_setup.out" "$SN/expected/"
 	cp -r "$WORK/data" "$SN/data"
@@ -518,13 +521,24 @@ make_suite() {
 		fi
 		if [ -f "$CB/output/$src.source" ]; then
 			convert "$g" "$CB/output/$src.source" | amsub | respell > "$SN/expected/$f.out"
+			[ -f "$CB/output/${src}_optimizer.source" ] &&
+				convert "$g" "$CB/output/${src}_optimizer.source" | amsub | respell \
+					> "$SN/expected/${f}_optimizer.out"
 		else
-			for e in "$CB/expected/$t.out" "$CB"/expected/"$t"_[0-9].out; do
+			for e in "$CB/expected/$t.out" "$CB"/expected/"$t"_[0-9].out \
+			         "$CB/expected/${t}_optimizer.out" "$CB"/expected/"$t"_optimizer_[0-9].out; do
 				[ -f "$e" ] || continue
 				convert "$g" "$e" | respell \
 					> "$SN/expected/$(echo "${e#"$CB"/expected/}" | tr / _)"
 			done
 		fi
+		# ORCA's expected output, where Cloudberry's suite has one: what its
+		# pg_regress compares a test with while the optimizer is on, and the
+		# alternatives to it, x_optimizer_1.out and on, in place of the
+		# planner's (pg_regress.c's get_expectfile()).  PostgreSQL 19's
+		# pg_regress is told so by a resultmap, which the ORCA pass has.
+		[ -f "$SN/expected/${f}_optimizer.out" ] &&
+			echo "$f:out:.*=${f}_optimizer.out" >> "$SN/resultmap.orca"
 		include_files "$g" "$SN" "$f"
 		schedule_add "$SN" "$f" "${run_pass[$i]}"
 	done
@@ -652,6 +666,13 @@ n=\$#
 exp="\${@:\$((n - 1)):1}"
 res="\${@:\$n:1}"
 opts=("\${@:1:\$((n - 2))}")
+# A test of the ORCA pass that has ORCA's expected output is compared with
+# it and its alternatives alone, as Cloudberry's pg_regress compares it: its
+# fall back on the planner's file, after them, is #if 0'd out, and
+# PostgreSQL 19's falls back on it -- where it is the ORCA output again.
+if [ "\$CB_DIFF_MODE" = orca ] && [ -f "\${exp%.out}_optimizer.out" ]; then
+	exp="\${exp%.out}_optimizer.out"
+fi
 name=\$(basename "\$exp" .out)
 cb=(-I HINT: -I CONTEXT: -I GP_IGNORE: --gpd_ignore_plans
     $(for f in "${inits[@]}"; do printf -- '--gpd_init "%s" ' "$f"; done))
@@ -778,6 +799,14 @@ run_group() {
 	fi
 	ln -sfn "$R/results" "$WORK/$g/cwd/results"
 	cd "$WORK/$g/cwd"
+	# ORCA's expected output for the ORCA pass (make_suite): pg_regress reads
+	# the resultmap from the suite's directory as it starts, and a group's
+	# passes run one after the other.
+	if [ "$pass" = orca ]; then
+		cp "$SN/resultmap.orca" "$SN/resultmap"
+	else
+		rm -f "$SN/resultmap"
+	fi
 	# PG_HOSTNAME and PG_BINDDIR are what Cloudberry's pg_regress sets for
 	# its tests: the host of segment 0, for their file:// and gpfdist://
 	# locations -- here every node's is this one -- and the directory of
@@ -820,7 +849,8 @@ run_group() {
 	# another expected output than the one it matched.
 	sed -nE 's/^ok +[0-9]+ +[-+] +([^ ]+) .*/\1/p' "$R/pg_regress.out" |
 	while read -r t; do
-		rm -f "$R/canon/$t.diff" "$R/canon/$t"_[0-9].diff
+		rm -f "$R/canon/$t.diff" "$R/canon/$t"_[0-9].diff \
+			"$R/canon/${t}_optimizer.diff" "$R/canon/$t"_optimizer_[0-9].diff
 	done
 }
 

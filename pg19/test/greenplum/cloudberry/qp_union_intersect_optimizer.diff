@@ -1,0 +1,8 @@
+@@
+-DETAIL:  Expected no more than one row to be returned by expression
+-ERROR:  one or more assertions failed
++ERROR:  more than one row returned by a subquery used as an expression
+@@
+-DETAIL:  Expected no more than one row to be returned by expression
+-ERROR:  one or more assertions failed
++ERROR:  more than one row returned by a subquery used as an expression

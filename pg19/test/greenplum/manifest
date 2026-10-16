@@ -476,7 +476,7 @@ skip gporca  function disable_xform(unknown) does not exist; under the planner, 
 run  gpsd
 run  catcache
 run  minirepro
-run  gporca_faults
+run  gporca_faults  planner  under ORCA its faults opt_relcache_translator_catalog_access and opt_clone_error_msg, in ORCA's relcache translator and in its copy of an error's message, are none of the port's ORCA's: its statements answer where Cloudberry's ORCA is cancelled or fails, as gporca_faults_optimizer.out says, which the ORCA pass compares it with since 2026-10-16
 run  rpt_tpch
 run  rpt_returning
 skip bfv_planner  differs: two counts of what its plans read are 27 and 9, where Cloudberry's are 33 and 11

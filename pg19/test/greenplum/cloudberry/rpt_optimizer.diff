@@ -1,0 +1,40 @@
+@@
++
++explain (costs off) create table rpt_ctas as select a from generate_series(1, 10) a group by a having sum(a) > random() distributed replicated;
++QUERY PLAN
++___________
+@@
+-explain (costs off) create table rpt_ctas as select a from generate_series(1, 10) a group by a having sum(a) > random() distributed replicated;
++-- update & delete
++explain (costs off) update t_replicate_volatile set a = 1 where b > random();
++QUERY PLAN
++___________
++
++explain (costs off) update t_replicate_volatile set a = 1 from t_replicate_volatile x where x.a + random() = t_replicate_volatile.b;
++QUERY PLAN
++___________
++
++explain (costs off) update t_replicate_volatile set a = 1 from t_hashdist x where x.a + random() = t_replicate_volatile.b;
+@@
+--- update & delete
+-explain (costs off) update t_replicate_volatile set a = 1 where b > random();
+-ERROR:  could not devise a plan
+-explain (costs off) update t_replicate_volatile set a = 1 from t_replicate_volatile x where x.a + random() = t_replicate_volatile.b;
+-ERROR:  could not devise a plan
+-explain (costs off) update t_replicate_volatile set a = 1 from t_hashdist x where x.a + random() = t_replicate_volatile.b;
+-ERROR:  could not devise a plan
+@@
+-ERROR:  could not devise a plan
++QUERY PLAN
++___________
++
+@@
+-ERROR:  could not devise a plan
++QUERY PLAN
++___________
++
+@@
+-ERROR:  could not devise a plan
++QUERY PLAN
++___________
++
