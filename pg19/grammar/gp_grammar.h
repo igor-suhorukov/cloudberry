@@ -101,4 +101,11 @@ extern void GpParseErrorCallback(void *arg);
 /* Installed during preload; O26's raw_parser_hook. */
 extern void GpGrammarInstallHook(void);
 
+/*
+ * GROUP_ID()'s copies of a grouping set counted in an analyzed query, each
+ * of its own level (gp_sql's post_parse_analyze_hook).
+ */
+struct Query;
+extern void GpDesugarGroupIds(struct Query *query);
+
 #endif							/* GP_GRAMMAR_H */

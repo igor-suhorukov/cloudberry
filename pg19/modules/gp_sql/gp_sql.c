@@ -98,6 +98,7 @@ PG_MODULE_MAGIC_EXT(
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 static object_access_hook_type prev_object_access = NULL;
 static ExecutorStart_hook_type prev_ExecutorStart = NULL;
+static post_parse_analyze_hook_type prev_post_parse_analyze = NULL;
 
 /*
  * What a statement the hook is watching has made, while it runs: the class
@@ -568,6 +569,18 @@ gp_sql_object_access(ObjectAccessType access, Oid classId, Oid objectId,
 	/* a role that owns a tag is not dropped (tag.c) */
 	else if (access == OAT_DROP && classId == AuthIdRelationId)
 		GpTagRoleDropped(objectId);
+}
+
+/*
+ * O26's GROUP_ID(), once the query is analyzed: the copies of a grouping set
+ * counted by the columns each groups by (gp_desugar.c).
+ */
+static void
+gp_sql_post_parse_analyze(ParseState *pstate, Query *query, const JumbleState *jstate)
+{
+	if (prev_post_parse_analyze)
+		prev_post_parse_analyze(pstate, query, jstate);
+	GpDesugarGroupIds(query);
 }
 
 /*
@@ -2627,6 +2640,8 @@ _PG_init(void)
 	 */
 	GpGrammarInstallHook();
 	*find_rendezvous_variable(CB_SQL_RENDEZVOUS) = (void *) &gp_max_partition_level;
+	prev_post_parse_analyze = post_parse_analyze_hook;
+	post_parse_analyze_hook = gp_sql_post_parse_analyze;
 
 	prev_ExecutorStart = ExecutorStart_hook;
 	ExecutorStart_hook = gp_sql_ExecutorStart;

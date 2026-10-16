@@ -2189,6 +2189,48 @@ refused "EXPLAIN ANALYZE of one would run it, and is refused" \
 is "and a cursor rolled back leaves no endpoint" \
    "SELECT count(*) FROM gp_get_endpoints();" "0"
 
+###############################################################################
+echo "21. GROUP_ID(): which copy of a grouping set a row is of"
+###############################################################################
+# Cloudberry numbers the copies of a grouping set a GROUP BY names more than
+# once, 0, 1 and on.  They are counted once the query is analyzed, by the
+# columns each set groups by, so that a set spelled two ways -- an output
+# column's alias and the expression it names, a column with its table's name
+# and without -- is one set (gp_desugar.c), where the rewrite of the
+# statement's text took them for two.  Each row below is a copy's number and
+# how many rows have it.
+q "CREATE TABLE gid (a int, b int); INSERT INTO gid SELECT i % 3, i % 2 FROM generate_series(1, 12) i;" > /dev/null
+gid_counts() {
+	echo "SELECT string_agg(g || ':' || n, ' ' ORDER BY g) FROM (SELECT g, count(*) AS n FROM ($1) s GROUP BY g) t;"
+}
+is "ROLLUP(a), a has (a) twice: copies 0 and 1" \
+   "$(gid_counts "SELECT a, group_id() AS g FROM gid GROUP BY ROLLUP(a), a")" "0:3 1:3"
+is "and so it has where the ROLLUP names a by its output column's alias" \
+   "$(gid_counts "SELECT a AS x, group_id() AS g FROM gid GROUP BY ROLLUP(x), a")" "0:3 1:3"
+is "or by its table's name" \
+   "$(gid_counts "SELECT a, group_id() AS g FROM gid GROUP BY ROLLUP(gid.a), a")" "0:3 1:3"
+is "ROLLUP(a), ROLLUP(a): (a) three times, and () once" \
+   "$(gid_counts "SELECT a, group_id() AS g FROM gid GROUP BY ROLLUP(a), ROLLUP(a)")" "0:4 1:3 2:3"
+is "a set the product makes of its columns in two orders, (a, b) and (b, a), is one" \
+   "$(gid_counts "SELECT a, b, group_id() AS g FROM gid GROUP BY ROLLUP(a), ROLLUP(b), ROLLUP(b, a)")" \
+   "0:12 1:8 2:8 3:6 4:6 5:6 6:6"
+is "an expression and the alias of it, in a CUBE" \
+   "$(gid_counts "SELECT a + b AS s, group_id() AS g FROM gid GROUP BY CUBE(s, a + b)")" "0:5 1:4 2:4"
+is "HAVING GROUP_ID() keeps the copies it asks for" \
+   "SELECT count(*) FROM (SELECT a FROM gid GROUP BY ROLLUP(a), a HAVING group_id() > 0) s;" "3"
+is "GROUP BY DISTINCT has each set once, and GROUP_ID() 0" \
+   "$(gid_counts "SELECT a, group_id() AS g FROM gid GROUP BY DISTINCT ROLLUP(a), a")" "0:3"
+is "a plain GROUP BY is one set, and GROUP_ID() 0" \
+   "$(gid_counts "SELECT a, group_id() AS g FROM gid GROUP BY a")" "0:3"
+is "a view keeps its copies counted" \
+   "CREATE VIEW gidv AS SELECT a AS x, group_id() AS g FROM gid GROUP BY ROLLUP(x), a;
+    $(gid_counts "SELECT * FROM gidv")" "0:3 1:3"
+isl "and so does a prepared statement analyzed again, after its table changed" \
+   "PREPARE gidp AS SELECT a AS x, group_id() AS g FROM gid GROUP BY ROLLUP(x), a;
+    EXECUTE gidp; ALTER TABLE gid ADD COLUMN c int;
+    CREATE TEMP TABLE gidr AS EXECUTE gidp;
+    $(gid_counts "SELECT * FROM gidr")" "0:3 1:3"
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
