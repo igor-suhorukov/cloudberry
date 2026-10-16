@@ -7,7 +7,13 @@ lines removed and added, hunk by hunk, with no file names, line numbers or
 plan lines -- named for the expected output it differs from; a name with a
 pass in it (test.orca.diff) holds for that pass alone.  run.sh counts a test
 as passing when gpdiff.pl, under Cloudberry's init_file and the port's, finds
-no difference or exactly the file's.
+no difference or exactly the file's.  What gpdiff.pl takes for a plan, and
+does not compare, is what ../../explain_only.pl says, as in the greenplum
+suite: a statement that begins with EXPLAIN, or calls a function that
+returns a plan's lines or counts what a plan is made of -- bfv_index's
+count_index_scans(), whose counts of the partitioned table's index scans
+differ under ORCA, 3 where Cloudberry's are 2 -- and not an answer a
+function gives of what EXPLAIN printed.
 
 Most of every difference is a statement that fails, for a reason its error
 names, and what comes of it: the rows a query over a table that was never

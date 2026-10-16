@@ -334,6 +334,11 @@ cp "$GPDIFF"/gpdiff.pl "$GPDIFF"/atmsort.pm "$GPDIFF"/explain.pm "$WORK/gpdiff/"
 # generates; the port has no configure.
 sed 's/##Version: ##/Apache Cloudberry (the PostgreSQL 19 port)/' \
 	"$GPDIFF/GPTest.pm.in" > "$WORK/gpdiff/GPTest.pm"
+# Cloudberry's tests are compared with a copy that takes for a plan only
+# what is one, as the greenplum suite's are (../explain_only.pl): a check
+# that runs EXPLAIN in a function and answers what it found is compared.
+cp -r "$WORK/gpdiff" "$WORK/gpdiff_cb"
+perl "$HERE/../explain_only.pl" "$WORK/gpdiff_cb/atmsort.pm" || exit 1
 
 # pg_regress compares with whatever "diff" is first on PATH.  This one
 # chooses the comparison by whose test it is, and calls the real diff by
@@ -354,13 +359,16 @@ n=\$#
 exp="\${@:\$((n - 1)):1}"
 res="\${@:\$n:1}"
 opts=("\${@:1:\$((n - 2))}")
-gpdiff() { exec env PATH=/usr/bin:/bin perl "$WORK/gpdiff/gpdiff.pl" "\$@"; }
+# the copy of gpdiff.pl a test is compared with: Cloudberry's tests', which
+# take for a plan only what is one, or PostgreSQL's
+gpd="$WORK/gpdiff"
+gpdiff() { exec env PATH=/usr/bin:/bin perl "\$gpd/gpdiff.pl" "\$@"; }
 reviewed() {
 	local dir="\$1" name canon
 	shift
 	name=\$(basename "\$exp" .out)
 	canon="$WORK/\$CB_DIFF_MODE/canon/\$name.diff"
-	env PATH=/usr/bin:/bin perl "$WORK/gpdiff/gpdiff.pl" -U0 "\$@" "\$exp" "\$res" 2> /dev/null |
+	env PATH=/usr/bin:/bin perl "\$gpd/gpdiff.pl" -U0 "\$@" "\$exp" "\$res" 2> /dev/null |
 		perl "$HERE/canon.pl" > "\$canon"
 	# A comparison that could not be made is a difference, never an empty one.
 	st=("\${PIPESTATUS[@]}")
@@ -372,6 +380,7 @@ reviewed() {
 	fi
 }
 if grep -qxF "\$(basename "\$res" .out)" "$SN/cloudberry_tests"; then
+	gpd="$WORK/gpdiff_cb"
 	cb=(-I HINT: -I CONTEXT: -I GP_IGNORE: --gpd_ignore_plans
 	    --gpd_init "$CB/init_file" --gpd_init "$HERE/init_file")
 	# less the place PostgreSQL 19 gives a shell type (shellpos.pl)

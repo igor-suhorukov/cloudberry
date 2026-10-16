@@ -77,10 +77,6 @@ once each (rangefuncs' tt_log), where PAX's expected output has none -- and
 which the port ran twice until 2026-10-16, the segments rewriting the
 statement the coordinator had rewritten already.
 
-What PAX's expected output was made with.  The LIMIT query of
-workfile/hashagg_spill, whose hash aggregate spills in Cloudberry's run and
-not in the port's, which Cloudberry's own copy of the test ignores.
-
 What the greenplum suite keeps of Cloudberry's own copy of a test, where
 PAX's copy has lines of its own.  distributed_transactions, as the greenplum
 suite's difference has it without the one-phase commit of its BEGIN; SET

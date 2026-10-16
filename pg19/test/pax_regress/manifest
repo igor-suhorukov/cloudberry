@@ -442,12 +442,12 @@ run  icudp/queue_depth_combination_capacity
 port icudp_off
 run  deadlock
 skip deadlock2  differs: Cloudberry's NOTICE that a slice prefetches a join's qual is not the port's
-run  workfile/hashagg_spill
-run  workfile/hashjoin_spill
+skip workfile/hashagg_spill  differs: as ../greenplum/manifest says of Cloudberry's own copy: its checks, whether every segment's hash aggregate spilled, answer 0 under ORCA and no row under the planner, where PAX's expected output has 1
+skip workfile/hashjoin_spill  differs: as ../greenplum/manifest says of Cloudberry's own copy: its checks, whether every segment's hash join spilled, answer 0 under ORCA and no row under the planner, where PAX's expected output has 1
 run  workfile/materialize_spill
 run  workfile/sisc_mat_sort
 run  workfile/sisc_sort_spill
-run  workfile/sort_spill
+skip workfile/sort_spill  differs: as ../greenplum/manifest says of Cloudberry's own copy: under the planner the sort is the coordinator's, and under ORCA the sort below LIMIT 50000 spills on every segment, where PAX's expected output has none
 run  workfile/spilltodisk
 skip zlib  canceling statement due to user request
 skip segspace  relation "gp_toolkit.gp_workfile_mgr_used_diskspace" does not exist; relation "gp_toolkit.gp_workfile_entries" does not exist

@@ -45,7 +45,9 @@
 # port's plans are ORCA's or the planner's with the port's Motions, and what
 # is compared is the answers -- or exactly a difference in cloudberry/,
 # reviewed and kept.  Two passes, as the singlenode suite has: the planner
-# (gp.optimizer = off) and ORCA.
+# (gp.optimizer = off) and ORCA.  What gpdiff.pl takes for a plan, and does
+# not compare, is a plan, not a function's answer of what EXPLAIN printed
+# (../explain_only.pl).
 #
 
 set -u
@@ -597,6 +599,11 @@ mkdir -p "$WORK/gpdiff"
 cp "$GPDIFF"/gpdiff.pl "$GPDIFF"/atmsort.pm "$GPDIFF"/explain.pm "$WORK/gpdiff/"
 sed 's/##Version: ##/Apache Cloudberry (the PostgreSQL 19 port)/' \
 	"$GPDIFF/GPTest.pm.in" > "$WORK/gpdiff/GPTest.pm"
+# What is not compared as a plan is compared: a check that runs EXPLAIN in a
+# function and answers what it found -- whether an operator spilled -- is
+# an answer, where Cloudberry's atmsort took it for a plan, and passed over
+# it here (../explain_only.pl).
+perl "$HERE/../explain_only.pl" "$WORK/gpdiff/atmsort.pm" || exit 1
 
 # The diff pg_regress runs: gpdiff.pl, for PostgreSQL's test_setup too, whose
 # tables are distributed here and say so; with a difference reviewed and

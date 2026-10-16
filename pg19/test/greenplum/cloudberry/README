@@ -8,6 +8,16 @@ in it (test.orca.diff) holds for that pass alone.  run.sh counts a test as
 passing when gpdiff.pl, under Cloudberry's init_file and the port's, finds no
 difference or exactly the file's.
 
+Not compared, as plans are not: the answers of a statement that counts
+what a plan is made of -- count_index_scans() (bfv_index, qp_gist_indexes2)
+and get_selected_parts() (partition_pruning) -- or returns a plan's lines
+from a function named for EXPLAIN (../../explain_only.pl).  Any other answer
+of a statement that runs EXPLAIN inside a function is, where Cloudberry's
+atmsort took the statement for a plan and the suite passed over what it
+answered, until 2026-10-16: whether an operator spilled, which no segment's
+did (workfile/hashagg_spill, hashjoin_spill and sort_spill, skipped since),
+and whether a sort printed its method (sort, runtime_stats).
+
 alter_db_set_tablespace  where segment 0 panics before its PREPARE record,
   the database's copy in the target tablespace on segment 0 and its mirror,
   which Cloudberry's leaves there (orphaned, as the test's table says) and

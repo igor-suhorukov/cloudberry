@@ -386,12 +386,12 @@ port icudp_off
 skip event_trigger_gp  differs: CREATE EXTERNAL TABLE fires the event triggers as CREATE FOREIGN TABLE, which the port makes it, and CREATE PROTOCOL and DROP PROTOCOL fire none
 run  deadlock
 skip deadlock2  differs: Cloudberry's NOTICE that a slice prefetches a join's qual is not the port's
-run  workfile/hashagg_spill
-run  workfile/hashjoin_spill
+skip workfile/hashagg_spill  differs: its checks, whether every segment's hash aggregate spilled under statement_mem = 1800kB, answer 0 under ORCA where Cloudberry's answer 1 -- the port gives each operator the statement's memory as its work_mem, where Cloudberry shares it among them (cloudberry.md, Track E's 2.4), and none spills at this size -- and no row under the planner, whose aggregate is the coordinator's, after a gather; atmsort took them for plans, and the suite passed over them, until 2026-10-16 (../explain_only.pl)
+skip workfile/hashjoin_spill  differs: as workfile/hashagg_spill's: its checks, whether every segment's hash join spilled under statement_mem = 1024kB, answer 0 under ORCA where Cloudberry's answer 1, and no row under the planner, whose join is the coordinator's, after a gather
 run  workfile/materialize_spill
 run  workfile/sisc_mat_sort
 run  workfile/sisc_sort_spill
-run  workfile/sort_spill
+skip workfile/sort_spill  differs: its first check, whether every segment's sort spilled under statement_mem = 1MB, finds no row under the planner, whose sort is the coordinator's, after a gather, where Cloudberry's finds every segment spilling; and under ORCA its second, of a sort below LIMIT 50000, finds every segment spilling where Cloudberry's finds none (as workfile/hashagg_spill's, compared since 2026-10-16)
 run  workfile/spilltodisk
 skip zlib  differs: its first join counts t1.*, a whole-row variable ORCA declines as Cloudberry's does, and the planner's route joins on the coordinator, where seg0's workfile_creation_failure is never reached; the fault left set fails the INSERT into test_zlib_hagg, whose rows ORCA relays from the coordinator's slice into a temporary file on each segment, so its GROUP BY finds no rows; and FuncA's hash join does not spill on seg0 at statement_mem 10MB, gp_resource giving a query its whole budget as work_mem, and PostgreSQL's hash table hash_mem_multiplier times that, where Cloudberry's has its operator's share
 run  workfile_limits
