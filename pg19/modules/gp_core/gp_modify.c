@@ -1327,10 +1327,12 @@ modify_exec(CustomScanState *node)
 	}
 
 	/*
-	 * A write the coordinator sends (GP_WRITE_MARKER), with its transaction
+	 * A write the coordinator sends (GP_WRITE_MARKER): with its transaction
 	 * and statement start times, which now() and its kin, and
-	 * statement_timestamp(), read on the segments too: UPDATE ... SET c =
-	 * now() gave each segment's rows a time of that segment's own.
+	 * statement_timestamp(), read on the segments too -- UPDATE ... SET c =
+	 * now() gave each segment's rows a time of that segment's own -- and
+	 * run there without the rules the coordinator applied already: a DO ALSO
+	 * rule's action ran here and again on each segment.
 	 */
 	sql = psprintf(GP_WRITE_MARKER INT64_FORMAT " " INT64_FORMAT "*/ %s",
 				   (int64) GetCurrentTransactionStartTimestamp(),

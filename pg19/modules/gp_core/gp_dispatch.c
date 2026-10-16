@@ -5995,6 +5995,14 @@ GpDispatchWriteOnContent(int content, const char *sql, int nparams,
 	uint64		count = 0;
 	int			idx = -1;
 
+	/*
+	 * the explicit write's, which the segment runs without the rules the
+	 * coordinator applied (GP_WRITE_MARKER)
+	 */
+	sql = psprintf(GP_WRITE_MARKER INT64_FORMAT " " INT64_FORMAT "*/ %s",
+				   (int64) GetCurrentTransactionStartTimestamp(),
+				   (int64) GetCurrentStatementStartTimestamp(), sql);
+
 	gang_prepare(g, true);
 
 	for (int i = 0; i < g->nconns; i++)

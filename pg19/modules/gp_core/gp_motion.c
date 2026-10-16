@@ -5016,7 +5016,8 @@ adopt_start_times(const char *times)
 /*
  * The coordinator's start times a write it sent begins with, after
  * GP_WRITE_MARKER, or NULL where the statement is no such write
- * (gp_modify.c): now() and its kin are read as the statement runs there.
+ * (gp_modify.c, gp_explicit.c): now() and its kin are read as the statement
+ * runs there.
  */
 static const char *
 write_times(const char *query_string)
@@ -5405,6 +5406,24 @@ motion_planner(Query *parse, const char *query_string, int cursorOptions,
 			return fragment_plan(payload, key);
 		if (fragment_depth > 0)
 			(void) fragment_safe_walker((Node *) parse, NULL);
+
+		/*
+		 * A write the coordinator sent, after its rules (GP_WRITE_MARKER),
+		 * and a query a rule of its table made of it again here: the
+		 * coordinator ran the rule's action itself, or sent it, and its
+		 * condition is made false here.  A DO ALSO rule's INSERT of the old
+		 * rows ran on the coordinator, routed, and again on each segment,
+		 * with the segment's rows, into the segment's own share of the
+		 * table, wherever their key put them (the gporca test).  A
+		 * conditional INSTEAD rule leaves the statement itself, its
+		 * condition denied a second time, which changes nothing.
+		 */
+		if (parse->querySource != QSRC_ORIGINAL &&
+			parse->commandType != CMD_UTILITY &&
+			write_times(query_string) != NULL)
+			parse->jointree->quals =
+				make_and_qual(parse->jointree->quals,
+							  (Node *) makeBoolConst(false, false));
 	}
 
 	if (prev_planner)

@@ -87,10 +87,8 @@
 +  data   
 +---------
 + barlog
-+ barlog
 + foollog
-+ foollog
-+(4 rows)
++(2 rows)
 @@
 +DETAIL:  It depends on temporary type users.
 +NOTICE:  function "get_first_user" will be effectively temporary

@@ -3924,6 +3924,27 @@ COMMIT;"
 		*) notok "now() in DDL and a pushed write on the segments" "$plan / $out" ;;
 	esac
 
+	# A rule's action runs once.  The coordinator rewrites a statement by its
+	# table's rules, and runs or sends each query that makes; a segment sent
+	# the statement itself -- an UPDATE sent whole, or the explicit write's,
+	# whose new rows the coordinator made from another distributed table --
+	# rewrote it again, and a DO ALSO rule's INSERT of the old rows ran once
+	# routed and again on each segment, into its own share of the table.
+	q 0 "CREATE TABLE rtt (x int, y int, z text) DISTRIBUTED BY (x);
+	     CREATE TABLE rta (x int, y int, z text) DISTRIBUTED BY (y);
+	     CREATE TABLE rtk (k int, v int) DISTRIBUTED BY (k);
+	     CREATE RULE rtt_audit AS ON UPDATE TO rtt DO INSERT INTO rta VALUES (old.x, old.y, old.z);
+	     INSERT INTO rtt SELECT i, i + 1, 'z' || i FROM generate_series(1, 10) i;
+	     INSERT INTO rtk SELECT i, 100 FROM generate_series(1, 10) i;" >/dev/null
+	out=$(printf '%s\n' "SET gp.optimizer = off;" "UPDATE rtt SET y = y + 1;" \
+		"SELECT count(*) || ' ' || count(DISTINCT x) FROM rta;" "TRUNCATE rta;" \
+		"UPDATE rtt SET y = rtt.y + rtk.v FROM rtk WHERE rtk.k = rtt.x;" \
+		"SELECT count(*) || ' ' || count(DISTINCT x) FROM rta;" | qf 0 | tr '\n' ' ')
+	plan=$(q 0 "SET gp.optimizer = off; EXPLAIN (VERBOSE, COSTS OFF) UPDATE rtt SET y = y + 1;" | grep -c "Remote SQL: *UPDATE")
+	[ "$out" = "10 10 10 10 " ] && [ "$plan" -ge 1 ] \
+		&& ok "a DO ALSO rule's action runs once, for an UPDATE sent whole and for the explicit write's" \
+		|| notok "a rule's action and a write the segments are sent" "$out / plan $plan"
+
 	# A correlated scalar subquery of an aggregate, which the planner would
 	# run for each row -- a gather of the table at each -- is a join with its
 	# rows grouped by the correlation, as Cloudberry's planner makes it

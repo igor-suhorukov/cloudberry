@@ -67,6 +67,12 @@ its gist index first (gpdist_opclasses); COPY FROM ... WHERE into a
 distributed table; a subquery in ON CONFLICT DO UPDATE; an index built
 CONCURRENTLY on a PAX table.
 
+What the port answers as PostgreSQL does where PAX's expected output does
+not.  A DO ALSO rule's INSERT, which the rows a function's INSERT writes run
+once each (rangefuncs' tt_log), where PAX's expected output has none -- and
+which the port ran twice until 2026-10-16, the segments rewriting the
+statement the coordinator had rewritten already.
+
 What PAX's expected output was made with.  The LIMIT query of
 workfile/hashagg_spill, whose hash aggregate spills in Cloudberry's run and
 not in the port's, which Cloudberry's own copy of the test ignores.
