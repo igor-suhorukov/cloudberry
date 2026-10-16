@@ -65,6 +65,15 @@
 #define GP_TIMES_MARKER		"/*gp:times "
 
 /*
+ * What a write the coordinator sends a segment whole starts with -- an
+ * UPDATE or DELETE (gp_modify.c): this marker, the coordinator's transaction
+ * and statement start times as integers, as GP_TIMES_MARKER has them, and
+ * the comment's end.  now() and its kin, and statement_timestamp(), read
+ * them on the segment (gp_motion.c).
+ */
+#define GP_WRITE_MARKER		"/*gp:write "
+
+/*
  * What the statement that tells a segment the coordinator's settings starts
  * with, which the segment passes Cloudberry's fault of a QE's SET at
  * (gp_settings.c).

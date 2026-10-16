@@ -29,6 +29,7 @@
 
 #include "postgres.h"
 
+#include "datatype/timestamp.h"
 #include "nodes/execnodes.h"
 #include "nodes/plannodes.h"
 
@@ -241,6 +242,14 @@ extern bool GpMotionIsFragment(PlannedStmt *stmt);
  * runs is called from (gp_ddl.c)?
  */
 extern bool GpMotionInFragment(void);
+
+/*
+ * now() and its kin, and statement_timestamp(), the coordinator's on a
+ * segment: its transaction's and statement's start times, as a fragment, a
+ * gather, a dispatched DDL statement (gp_ddl.c) and a write sent whole bring
+ * them.
+ */
+extern void GpMotionAdoptStartTimes(TimestampTz xact_ts, TimestampTz stmt_ts);
 
 /*
  * Can a parallel retrieve cursor's top slice, below this Gather, run on

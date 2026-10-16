@@ -3904,6 +3904,26 @@ COMMIT;"
 		&& ok "and now() and CURRENT_TIMESTAMP on the segments are the coordinator's transaction start" \
 		|| notok "now() in a condition sent to the segments" "$out"
 
+	# So are they in a DDL statement the segments are sent, and in a write
+	# sent to them whole: ADD COLUMN ... DEFAULT now() gave each segment the
+	# start of its own transaction, a value of its own for every row it
+	# held, and UPDATE ... SET u = now() and statement_timestamp() each
+	# segment's own.  The segments' transactions begin after the
+	# coordinator's, with the CREATE TABLE.
+	out=$(printf '%s\n' "SET gp.optimizer = off;" "BEGIN;" "SELECT pg_sleep(0.2);" \
+		"CREATE TABLE stw (id int, v int) DISTRIBUTED BY (id);" \
+		"INSERT INTO stw SELECT i, i FROM generate_series(1, 30) i;" \
+		"ALTER TABLE stw ADD COLUMN ts timestamptz DEFAULT now(), ADD COLUMN u timestamptz, ADD COLUMN s timestamptz;" \
+		"UPDATE stw SET u = now(), s = statement_timestamp();" \
+		"SELECT count(DISTINCT ts) || ' ' || bool_and(ts = now()) || ' ' || count(DISTINCT u) || ' ' || bool_and(u = now()) || ' ' || count(DISTINCT s) || ' ' || bool_and(s > now()) FROM stw;" \
+		"COMMIT;" | qf 0 | tail -1)
+	plan=$(q 0 "SET gp.optimizer = off; EXPLAIN (VERBOSE, COSTS OFF) UPDATE stw SET u = now(), s = statement_timestamp();" | grep "Remote SQL")
+	case "$plan|$out" in
+		*"Remote SQL:"*"UPDATE"*"|1 true 1 true 1 true")
+			ok "a DDL statement and a write sent whole take the coordinator's now() and statement_timestamp() on every segment" ;;
+		*) notok "now() in DDL and a pushed write on the segments" "$plan / $out" ;;
+	esac
+
 	# A correlated scalar subquery of an aggregate, which the planner would
 	# run for each row -- a gather of the table at each -- is a join with its
 	# rows grouped by the correlation, as Cloudberry's planner makes it

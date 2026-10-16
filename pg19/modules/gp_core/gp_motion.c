@@ -4992,18 +4992,39 @@ gather_times(const char *query_string)
  * called in one; a segment's process is the coordinator's worker as a
  * parallel worker is its leader's, and is taken for one while it is told.
  */
+void
+GpMotionAdoptStartTimes(TimestampTz xact_ts, TimestampTz stmt_ts)
+{
+	int			worker = ParallelWorkerNumber;
+
+	ParallelWorkerNumber = 0;
+	SetParallelStartTimestamps(xact_ts, stmt_ts);
+	ParallelWorkerNumber = worker;
+}
+
 static void
 adopt_start_times(const char *times)
 {
 	int64		xact_ts;
 	int64		stmt_ts;
-	int			worker = ParallelWorkerNumber;
 
 	if (sscanf(times, INT64_FORMAT " " INT64_FORMAT, &xact_ts, &stmt_ts) != 2)
 		elog(ERROR, "a fragment's start times are malformed: \"%s\"", times);
-	ParallelWorkerNumber = 0;
-	SetParallelStartTimestamps((TimestampTz) xact_ts, (TimestampTz) stmt_ts);
-	ParallelWorkerNumber = worker;
+	GpMotionAdoptStartTimes((TimestampTz) xact_ts, (TimestampTz) stmt_ts);
+}
+
+/*
+ * The coordinator's start times a write it sent begins with, after
+ * GP_WRITE_MARKER, or NULL where the statement is no such write
+ * (gp_modify.c): now() and its kin are read as the statement runs there.
+ */
+static const char *
+write_times(const char *query_string)
+{
+	if (query_string == NULL ||
+		strncmp(query_string, GP_WRITE_MARKER, strlen(GP_WRITE_MARKER)) != 0)
+		return NULL;
+	return query_string + strlen(GP_WRITE_MARKER);
 }
 
 static void
@@ -5035,6 +5056,14 @@ motion_executor_start(QueryDesc *queryDesc, int eflags)
 			rte->perminfoindex = 0;
 		queryDesc->plannedstmt->permInfos = NIL;
 	}
+
+	/*
+	 * A write sent whole, UPDATE ... SET c = now(): the coordinator's times,
+	 * which its own part of the statement reads too, where each segment's
+	 * own gave each segment's rows a time of its own.
+	 */
+	if (GpClusterIsDispatched() && write_times(queryDesc->sourceText) != NULL)
+		adopt_start_times(write_times(queryDesc->sourceText));
 
 	if (GpClusterIsDispatched() && is_fragment(queryDesc->plannedstmt))
 	{
@@ -5214,6 +5243,14 @@ motion_executor_run(QueryDesc *queryDesc, ScanDirection direction,
 		if (times != NULL)
 			adopt_start_times(times);
 	}
+
+	/*
+	 * And a write sent whole (motion_executor_start()), whose Execute took a
+	 * start of its own after the Bind that started it.
+	 */
+	if (!fragment && GpClusterIsDispatched() &&
+		write_times(queryDesc->sourceText) != NULL)
+		adopt_start_times(write_times(queryDesc->sourceText));
 
 	if (fragment)
 		fragment_depth++;

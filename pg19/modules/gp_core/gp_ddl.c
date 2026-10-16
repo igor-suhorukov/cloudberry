@@ -140,10 +140,12 @@
 /*
  * What a dispatched statement's text starts with.  Only a dispatched backend
  * looks for it, so a user who types it gets PostgreSQL's syntax error.  Then
- * the OIDs, "oids=<catalog>:<oid>,...", and " text=<n>" where the client's
- * statement follows the line's end in n bytes -- what the segment's
- * pg_stat_activity shows while it runs the tree, as Cloudberry's segments
- * show the statement the coordinator dispatched -- and then the tree.
+ * the OIDs, "oids=<catalog>:<oid>,...", the coordinator's transaction and
+ * statement start times, " times=<transaction>,<statement>", and
+ * " text=<n>" where the client's statement follows the line's end in n bytes
+ * -- what the segment's pg_stat_activity shows while it runs the tree, as
+ * Cloudberry's segments show the statement the coordinator dispatched -- and
+ * then the tree.
  */
 #define GP_TREE_MARKER		"/*gp:dispatched-tree*/"
 
@@ -1341,13 +1343,21 @@ next_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
  * The end of the first line of what the segments are sent, and the client's
  * statement after it: what pg_stat_activity shows of it here, as much of it
  * as a segment's shows, and what a segment's log names as its statement
- * (gp_log.c) -- sent whether activities are tracked or not.
+ * (gp_log.c) -- sent whether activities are tracked or not.  Before it the
+ * coordinator's start times, which now() and its kin, and
+ * statement_timestamp(), read on the segment too: ADD COLUMN ... DEFAULT
+ * now() gave each segment the start of its own transaction, a value of its
+ * own for every row it held, where Cloudberry's segments have the value its
+ * coordinator computed (tablecmds.c sends it).
  */
 static void
 payload_text(StringInfo buf)
 {
 	int			len = 0;
 
+	appendStringInfo(buf, " times=" INT64_FORMAT "," INT64_FORMAT,
+					 (int64) GetCurrentTransactionStartTimestamp(),
+					 (int64) GetCurrentStatementStartTimestamp());
 	if (debug_query_string != NULL)
 		len = pg_mbcliplen(debug_query_string, strlen(debug_query_string),
 						   pgstat_track_activity_query_size - 1);
@@ -2119,11 +2129,15 @@ gp_ddl_raw_parser(const char *str, RawParseMode mode)
 		const char *p = str + strlen(GP_TREE_MARKER);
 		const char *nl;
 		const char *oids_end;
+		const char *field;
 		const char *tree;
 		RawStmt    *raw;
 		Node	   *stmt;
 		MemoryContext oldcxt;
 		int			n = 0;
+		bool		has_times = false;
+		TimestampTz times_xact = 0;
+		TimestampTz times_stmt = 0;
 
 		if (strncmp(p, "oids=", 5) != 0 || (nl = strchr(p, '\n')) == NULL)
 			ereport(ERROR,
@@ -2131,21 +2145,46 @@ gp_ddl_raw_parser(const char *str, RawParseMode mode)
 					 errmsg("malformed dispatched statement")));
 		p += 5;
 
-		/* the client's statement, which this backend shows while it runs */
 		tree = nl + 1;
 		oids_end = memchr(p, ' ', nl - p);
 		if (oids_end == NULL)
 			oids_end = nl;
-		else
+		field = oids_end;
+
+		/* the coordinator's start times, the segment's from now on */
+		if (strncmp(field, " times=", 7) == 0)
+		{
+			char	   *end;
+			long long	xact_ts;
+			long long	stmt_ts;
+
+			xact_ts = strtoll(field + 7, &end, 10);
+			if (*end != ',')
+				ereport(ERROR,
+						(errcode(ERRCODE_PROTOCOL_VIOLATION),
+						 errmsg("malformed dispatched statement")));
+			stmt_ts = strtoll(end + 1, &end, 10);
+			if (*end != ' ' && end != nl)
+				ereport(ERROR,
+						(errcode(ERRCODE_PROTOCOL_VIOLATION),
+						 errmsg("malformed dispatched statement")));
+			times_xact = (TimestampTz) xact_ts;
+			times_stmt = (TimestampTz) stmt_ts;
+			has_times = true;
+			field = end;
+		}
+
+		/* the client's statement, which this backend shows while it runs */
+		if (field != nl)
 		{
 			char	   *end;
 			long		len;
 
-			if (strncmp(oids_end, " text=", 6) != 0)
+			if (strncmp(field, " text=", 6) != 0)
 				ereport(ERROR,
 						(errcode(ERRCODE_PROTOCOL_VIOLATION),
 						 errmsg("malformed dispatched statement")));
-			len = strtol(oids_end + 6, &end, 10);
+			len = strtol(field + 6, &end, 10);
 			if (end != nl || len < 0 || len > (long) strlen(tree))
 				ereport(ERROR,
 						(errcode(ERRCODE_PROTOCOL_VIOLATION),
@@ -2153,6 +2192,8 @@ gp_ddl_raw_parser(const char *str, RawParseMode mode)
 			pgstat_report_activity(STATE_RUNNING, pnstrdup(tree, len));
 			tree += len;
 		}
+		if (has_times)
+			GpMotionAdoptStartTimes(times_xact, times_stmt);
 
 		preassigned_clear();
 		MemoryContextReset(ddl_cxt);
@@ -2233,7 +2274,8 @@ GpDispatchIsTreeText(const char *str)
 /*
  * The client's statement a dispatched statement's text carries, the n bytes
  * after its first line's " text=<n>" (payload_text()), into *len; NULL where
- * it carries none.  Its first line has no space before that.
+ * it carries none.  Its first line has no space before that but the one
+ * before the start times, " times=", if they are there.
  */
 const char *
 GpDispatchTreeStatement(const char *str, int *len)
@@ -2244,7 +2286,12 @@ GpDispatchTreeStatement(const char *str, int *len)
 	long		n;
 
 	if (!GpDispatchIsTreeText(str) || (nl = strchr(str, '\n')) == NULL ||
-		(p = memchr(str, ' ', nl - str)) == NULL || strncmp(p, " text=", 6) != 0)
+		(p = memchr(str, ' ', nl - str)) == NULL)
+		return NULL;
+	if (strncmp(p, " times=", 7) == 0 &&
+		(p = memchr(p + 1, ' ', nl - (p + 1))) == NULL)
+		return NULL;
+	if (strncmp(p, " text=", 6) != 0)
 		return NULL;
 	n = strtol(p + 6, &end, 10);
 	if (end != nl || n <= 0 || n > (long) strlen(nl + 1))

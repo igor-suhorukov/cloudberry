@@ -1288,6 +1288,7 @@ modify_exec(CustomScanState *node)
 	const char **values = NULL;
 	uint64	   *counts;
 	int			nsegs;
+	char	   *sql;
 
 	if (state->done)
 		return NULL;
@@ -1325,17 +1326,27 @@ modify_exec(CustomScanState *node)
 		}
 	}
 
+	/*
+	 * A write the coordinator sends (GP_WRITE_MARKER), with its transaction
+	 * and statement start times, which now() and its kin, and
+	 * statement_timestamp(), read on the segments too: UPDATE ... SET c =
+	 * now() gave each segment's rows a time of that segment's own.
+	 */
+	sql = psprintf(GP_WRITE_MARKER INT64_FORMAT " " INT64_FORMAT "*/ %s",
+				   (int64) GetCurrentTransactionStartTimestamp(),
+				   (int64) GetCurrentStatementStartTimestamp(), state->sql);
+
 	GpClusterSegments(&nsegs);
 	counts = palloc0_array(uint64, nsegs);
 	if (state->ncontents > 0)
 	{
-		GpDispatchCommandParamsOnContents(state->sql, nparams, types, values,
+		GpDispatchCommandParamsOnContents(sql, nparams, types, values,
 										  state->contents, state->ncontents,
 										  counts);
 		nsegs = state->ncontents;
 	}
 	else
-		GpDispatchCommandParams(state->sql, nparams, types, values, -1,
+		GpDispatchCommandParams(sql, nparams, types, values, -1,
 								state->nsegments, counts);
 
 	/* Every segment changed its own rows; a replicated table's once each. */
