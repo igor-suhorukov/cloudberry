@@ -83,12 +83,17 @@ fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/cb-greenplum-XXXXXX")"
 SOCK="$(mktemp -d /tmp/cbg-XXXXXX)"
+# The four letters the job's own paths right under /tmp begin with
+# (own_tmp), held as a directory's name while it runs, so that no job
+# beside it has them
+TOKDIR="$(mktemp -d /tmp/cbt-XXXX)"
+TMPTOK="${TOKDIR##*-}"
 # What is executed cannot be in /tmp, which the Compose project mounts noexec
 # (see the singlenode suite).
 EXEC="$(mktemp -d "${HOME:-/var/lib/postgresql}/cb-greenplum-XXXXXX")"
 if ! . "$HERE/../gpmgmt/tools.sh" "$EXEC"; then
 	echo "gpMgmt, or the Python it needs, is not installed; skipping"
-	rm -rf "$WORK" "$SOCK" "$EXEC"
+	rm -rf "$WORK" "$SOCK" "$EXEC" "$TOKDIR"
 	exit 77
 fi
 BASEPORT="${PGPORT:-$((7300 + RANDOM % 200))}"
@@ -207,8 +212,12 @@ cleanup() {
 			"$BINDIR/pg_ctl" -D "$d" -m immediate stop > /dev/null 2>&1
 		done
 	done
+	# what the tests made under their own names in /tmp (own_tmp)
+	if [ -z "${KEEP:-}" ] && [ -f "$WORK/own_tmp" ]; then
+		while read -r p; do rm -rf "$p" "$p".* "$p"-*; done < "$WORK/own_tmp"
+	fi
 	[ -n "${KEEP:-}" ] && echo "kept: $WORK" || rm -rf "$WORK"
-	rm -rf "$SOCK" "$EXEC"
+	rm -rf "$SOCK" "$EXEC" "$TOKDIR"
 }
 trap cleanup EXIT
 
@@ -539,8 +548,38 @@ make_suite() {
 		# pg_regress is told so by a resultmap, which the ORCA pass has.
 		[ -f "$SN/expected/${f}_optimizer.out" ] &&
 			echo "$f:out:.*=${f}_optimizer.out" >> "$SN/resultmap.orca"
+		own_tmp "$SN" "$f"
 		include_files "$g" "$SN" "$f"
 		schedule_add "$SN" "$f" "${run_pass[$i]}"
+	done
+}
+# own_tmp <suite dir> <test>: the paths right under /tmp a test names in
+# its SQL -- a tablespace's directory, the files of a COPY -- the job's own,
+# in the test and in its expected output, as isolation2's harness has them.
+# Two jobs of this harness side by side run the same tests at times: one
+# test's DROP TABLESPACE removed the directory the other job's standby was
+# replaying a CREATE TABLESPACE into, and two COPYs write one file.  The
+# name keeps its length -- the first four letters become TMPTOK -- since the
+# output prints it, in tables it sets the width of.  Not a URL's path
+# (file://host/tmp/x), and not a name two of the test's would share then.
+own_tmp() {
+	local SN="$1" f="$2" n new e names=() seen=" "
+	while read -r n; do
+		[ "${#n}" -gt 4 ] || continue
+		new="$TMPTOK${n:4}"
+		case "$seen" in *" $new "*) return ;; esac
+		seen="$seen$new "
+		names+=("$n")
+	done < <(grep -oE '(^|[^A-Za-z0-9_.:/-])/tmp/[A-Za-z0-9_]+' "$SN/sql/$f.sql" |
+		sed -E 's#.*/tmp/##' | sort -u)
+	for n in "${names[@]}"; do
+		new="$TMPTOK${n:4}"
+		for e in "$SN/sql/$f.sql" "$SN/expected/$f.out" "$SN/expected/${f}"_[0-9].out \
+		         "$SN/expected/${f}_optimizer.out" "$SN/expected/${f}"_optimizer_[0-9].out; do
+			[ -f "$e" ] &&
+				sed -Ei "s#(^|[^A-Za-z0-9_.:/-])/tmp/$n([^A-Za-z0-9_]|\$)#\\1/tmp/$new\\2#g" "$e"
+		done
+		echo "/tmp/$new" >> "$WORK/own_tmp"
 	done
 }
 # include_files <group> <suite dir> <test>: a file the test includes, \i
