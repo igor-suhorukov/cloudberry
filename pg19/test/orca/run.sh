@@ -21,8 +21,10 @@
 #
 # The module is ORCA's four core libraries compiled from Cloudberry's own tree
 # at their own paths -- 920 sources, unmodified, because not one file under
-# them includes a PostgreSQL header -- plus a translator under pg19/orca/ that
-# is the port's own code, being the only part that knows what a PostgreSQL is.
+# them includes a PostgreSQL header, but for the two pg19/orca/core/ holds
+# copies of, each with a fix of ORCA's own (section 27) -- plus a translator
+# under pg19/orca/ that is the port's own code, being the only part that
+# knows what a PostgreSQL is.
 #
 # What these tests are for: to show that the ORCA the server runs is the one
 # the port means to run.  A build that quietly picked up the single-node fork
@@ -4049,6 +4051,60 @@ same "over a window, a sliding frame and a partition's running one" \
      "SELECT a, median(a) OVER (ORDER BY a ROWS BETWEEN 3 PRECEDING AND CURRENT ROW),
              median(c) OVER (PARTITION BY b ORDER BY a)
         FROM t0 WHERE a <= 60 ORDER BY a"
+
+echo
+echo "27. ORCA's statistics, two fixes of its own in the port's copies of its files"
+
+# pg19/orca/core/ holds the two files of ORCA's core the port compiles in place
+# of Cloudberry's, for two assertions in ORCA's statistics code which a build
+# with assertions met in TPC-DS 54 and 78, as ANALYZE's sample fell, and then
+# declined the query on: the tpc suite's checked run failed one time in six.
+# Each check here fixes the statistics its query is planned with, so that
+# without the fix it meets the assertion every time.
+
+# A scalar subquery's statistics are its rows scaled to one, as its rows times
+# one over its rows, which for 49 is 0.99999999999999989.  A condition on its
+# computed column, which has no histogram, took that for its factor, and the
+# join's came out under one, which CJoinStatsProcessor.cpp asserts it is not:
+# TPC-DS 54's date_dim against its subquery of the month after December 1998.
+# The subquery's table has its row count and no column statistics, which
+# leaves its column without a histogram as TPC-DS 54's computed one is; ORCA
+# would say so in a NOTICE that the planner does not give.
+q "CREATE TABLE st_big (a int, b int) WITH (autovacuum_enabled = off);
+   CREATE TABLE st_one (a int) WITH (autovacuum_enabled = off);
+   INSERT INTO st_big SELECT i, i FROM generate_series(1, 1000) i;
+   INSERT INTO st_one VALUES (7);
+   ANALYZE st_big;
+   SELECT pg_restore_relation_stats('schemaname', 'public', 'relname', 'st_one',
+       'relpages', 1::integer, 'reltuples', 49::real, 'relallvisible', 0::integer);" > /dev/null
+
+same "a scalar subquery of 49 rows, a little under one row when scaled to one" \
+     "SELECT count(*) FROM st_big WHERE b >= (SELECT a + 1 FROM st_one)" \
+     "SET gp.optimizer_print_missing_stats = off"
+
+# A bucket's number of values is scaled with its rows and may be a fraction of
+# one.  Joining two buckets of one value each, ORCA divided the product of
+# their frequencies by the larger of those numbers, and a fraction made the
+# new bucket's frequency more than one, which CBucket.cpp asserts it is not:
+# TPC-DS 78's two buckets of frequency one and 0.3367 values became one of
+# 2.97.  ANALYZE would not write these statistics -- four buckets over two
+# values, half a value each -- but they are the shape ORCA's own arithmetic
+# reached there, and an equality on the column keeps one bucket of each side.
+q "CREATE TABLE st_h1 (a int) WITH (autovacuum_enabled = off);
+   CREATE TABLE st_h2 (a int) WITH (autovacuum_enabled = off);
+   INSERT INTO st_h1 SELECT i % 5 + 1 FROM generate_series(1, 100) i;
+   INSERT INTO st_h2 SELECT i % 5 + 1 FROM generate_series(1, 100) i;
+   SELECT pg_restore_relation_stats('schemaname', 'public', 'relname', t,
+       'relpages', 1::integer, 'reltuples', 100::real, 'relallvisible', 0::integer)
+     FROM unnest(ARRAY['st_h1', 'st_h2']) t;
+   SELECT pg_restore_attribute_stats('schemaname', 'public', 'relname', t,
+       'attname', 'a', 'inherited', false, 'null_frac', 0::real,
+       'avg_width', 4::integer, 'n_distinct', 2::real,
+       'histogram_bounds', '{1,2,3,4,5}'::text)
+     FROM unnest(ARRAY['st_h1', 'st_h2']) t;" > /dev/null
+
+same "a join of two buckets of half a value each" \
+     "SELECT count(*) FROM st_h1 JOIN st_h2 USING (a) WHERE st_h1.a = 3"
 
 echo
 echo "  $pass passed, $fail failed"

@@ -9,8 +9,9 @@ applying to them; this directory is the only new top-level directory.
     modules/     one directory per extension module: build, glue, SQL, control
     grammar/     O26's desugaring: Cloudberry's spelling of a statement
                  rewritten into PostgreSQL's, before the grammar sees it
-    orca/        ORCA: its core taken from Cloudberry's tree unmodified, and
-                 the translator, which is the port's own code
+    orca/        ORCA: its core taken from Cloudberry's tree unmodified, but
+                 for the fixes of its own in core/'s copies, and the
+                 translator, which is the port's own code
     docker/      the Compose project: patched PG19, the modules, a cluster
     gpMgmt/      Cloudberry's management tools on PostgreSQL 19's own: what
                  is installed, and the port's copies of the files it changes
@@ -39,6 +40,18 @@ PostgreSQL, and they live here under `orca/` as the port's own code.
 `core_sources.txt` is a checked-in list rather than a glob, so that a source
 added or removed upstream shows up in review; `list-core-sources.sh`
 refreshes it.
+
+Two of the core's files the port does change, for fixes of ORCA's own:
+`orca/core/` holds copies of them at their paths below `src/backend/gporca`,
+which the build compiles in their place, Cloudberry's own left as they are so
+that a merge from upstream still applies to them. Both are in its statistics
+code, where a server with assertions declined TPC-DS 54 and 78 now and then
+as ANALYZE's sample fell: a join's scale factor under one, from a scalar
+subquery's one row a little under one (`CJoinStatsProcessor.cpp`), and a
+joined bucket's frequency over one, from a fraction of a value in each bucket
+(`CBucket.cpp`). The head of each copy says what it changes and why; a merge
+that changes the original is carried into the copy by hand. The orca suite's
+section 27 checks both.
 
 ## What is built
 

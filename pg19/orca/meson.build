@@ -24,9 +24,11 @@
 # Two halves, and the split is the point:
 #
 #   the core       libgpos, libnaucrates, libgpopt, libgpdbcost, compiled from
-#                  Cloudberry's tree at their own paths, unmodified.  Nothing
-#                  under them includes a PostgreSQL header, so there is no
-#                  PostgreSQL 16 in them to port.
+#                  Cloudberry's tree at their own paths, unmodified -- but
+#                  for the few core/ holds copies of, compiled in their
+#                  place, each a fix of ORCA's own.  Nothing under them
+#                  includes a PostgreSQL header, so there is no PostgreSQL 16
+#                  in them to port.
 #
 #   the translator Query/plan <-> DXL, which is all of the PostgreSQL coupling
 #                  there is.  It lives under translate/ here, as the port's own
@@ -50,7 +52,7 @@ if not xerces_dep.found()
 endif
 
 ###############################################################################
-# The core: Cloudberry's ORCA, unmodified
+# The core: Cloudberry's ORCA, unmodified but for core/'s copies
 ###############################################################################
 
 orca_root = '..' / '..' / 'src' / 'backend' / 'gporca'
@@ -63,12 +65,21 @@ orca_core_inc = include_directories(
 )
 
 # The source list is a checked-in file rather than a glob; see
-# list-core-sources.sh for why, and for how to refresh it.
+# list-core-sources.sh for why, and for how to refresh it.  A source the
+# port keeps a copy of under core/, at its path below src/backend/gporca, is
+# compiled from the copy instead: a fix of ORCA's own, Cloudberry's file left
+# as it is, so that a merge from apache/cloudberry still applies to it.  The
+# head of each copy says what it changes, and why.
 orca_core_sources = []
 foreach line : fs.read('core_sources.txt').strip().split('\n')
   path = line.strip()
   if path != '' and not path.startswith('#')
-    orca_core_sources += files(path)
+    copy = 'core' / path.split(orca_root + '/')[-1]
+    if fs.is_file(copy)
+      orca_core_sources += files(copy)
+    else
+      orca_core_sources += files(path)
+    endif
   endif
 endforeach
 

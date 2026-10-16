@@ -49,7 +49,9 @@ cat <<'HEADER'
 # code on PostgreSQL 19 as on Cloudberry's PostgreSQL 16, and the port takes
 # them unmodified.  That is what keeps Cloudberry's own ORCA features (plan
 # hints, parallel scans, the dedup-superset preprocessor, partial aggregation
-# below joins) without porting a line of them.
+# below joins) without porting a line of them.  A file listed here that core/
+# holds a copy of, at its path below src/backend/gporca, is compiled from the
+# copy, for a fix of ORCA's own (meson.build).
 HEADER
 
 find "$G/libgpos/src" "$G/libnaucrates/src" "$G/libgpopt/src" "$G/libgpdbcost/src" \
