@@ -79,12 +79,14 @@
 #include "access/htup_details.h"
 #include "access/relation.h"
 #include "access/table.h"
+#include "access/tableam.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
 #include "catalog/dependency.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_depend.h"
 #include "catalog/pg_extension.h"
+#include "catalog/pg_inherits.h"
 #include "catalog/pg_namespace.h"
 #include "parser/parse_node.h"
 #include "parser/parse_type.h"
@@ -102,6 +104,7 @@
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
 #include "nodes/parsenodes.h"
 #include "nodes/readfuncs.h"
 #include "parser/parser.h"
@@ -234,6 +237,127 @@ vacuum_skips_locked(Node *stmt)
 			return defGetBoolean(opt);
 	}
 	return false;
+}
+
+/*
+ * Does an expression, as the parser wrote it, call nextval()?  A default
+ * that calls a function of the user's that calls it is not seen.
+ */
+static bool
+calls_nextval_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, FuncCall) &&
+		strcmp(strVal(llast(((FuncCall *) node)->funcname)), "nextval") == 0)
+		return true;
+	return raw_expression_tree_walker(node, calls_nextval_walker, context);
+}
+
+/*
+ * Does an ALTER TABLE give the rows its table has a value of a sequence as
+ * it rewrites them -- ADD COLUMN of a serial type, of a DEFAULT that calls
+ * nextval() or GENERATED ... AS IDENTITY, or ALTER COLUMN ... TYPE ... USING
+ * nextval()?  As the parser wrote it, the tree the coordinator sends.
+ */
+static bool
+alter_fills_from_sequence(AlterTableStmt *stmt)
+{
+	foreach_node(AlterTableCmd, cmd, stmt->cmds)
+	{
+		ColumnDef  *def;
+
+		if (cmd->def == NULL || !IsA(cmd->def, ColumnDef))
+			continue;
+		def = (ColumnDef *) cmd->def;
+		if (cmd->subtype == AT_AlterColumnType)
+		{
+			if (calls_nextval_walker(def->raw_default, NULL))
+				return true;
+			continue;
+		}
+		if (cmd->subtype != AT_AddColumn)
+			continue;
+		/* as transformColumnDefinition() knows a serial type */
+		if (def->typeName != NULL && list_length(def->typeName->names) == 1 &&
+			!def->typeName->pct_type)
+		{
+			const char *typname = strVal(linitial(def->typeName->names));
+
+			if (strcmp(typname, "smallserial") == 0 ||
+				strcmp(typname, "serial2") == 0 ||
+				strcmp(typname, "serial") == 0 ||
+				strcmp(typname, "serial4") == 0 ||
+				strcmp(typname, "bigserial") == 0 ||
+				strcmp(typname, "serial8") == 0)
+				return true;
+		}
+		if (calls_nextval_walker(def->raw_default, NULL))
+			return true;
+		foreach_node(Constraint, con, def->constraints)
+		{
+			if (con->contype == CONSTR_IDENTITY ||
+				(con->contype == CONSTR_DEFAULT &&
+				 calls_nextval_walker(con->raw_expr, NULL)))
+				return true;
+		}
+	}
+	return false;
+}
+
+/*
+ * A segment, about to run an ALTER TABLE that gives its table's rows values
+ * of a sequence: refused where this segment holds a row of the table.  Each
+ * segment's copy of the sequence would number the segment's own rows from
+ * the start, every value of them taken on each segment, where Cloudberry's
+ * segments take a sequence's values from the coordinator, as the port's do
+ * in a query's slice (gp_seq.c) but not in a statement's rewrite of a table
+ * (alter_table_aocs: d > 15 found no row of 20 numbered 1 to 20).  A table
+ * that has no rows takes the column.
+ */
+static void
+refuse_sequence_fill(AlterTableStmt *stmt)
+{
+	LOCKMODE	lockmode;
+	Oid			relid;
+	List	   *rels;
+
+	if (stmt->objtype != OBJECT_TABLE || !alter_fills_from_sequence(stmt))
+		return;
+	lockmode = AlterTableGetLockLevel(stmt->cmds);
+	relid = RangeVarGetRelidExtended(stmt->relation, lockmode,
+									 stmt->missing_ok ? RVR_MISSING_OK : 0,
+									 NULL, NULL);
+	if (!OidIsValid(relid))
+		return;
+	rels = stmt->relation->inh ? find_all_inheritors(relid, lockmode, NULL)
+		: list_make1_oid(relid);
+	foreach_oid(rel_oid, rels)
+	{
+		Relation	rel = table_open(rel_oid, NoLock);
+		bool		has_rows = false;
+
+		if (RELKIND_HAS_STORAGE(rel->rd_rel->relkind))
+		{
+			TableScanDesc scan = table_beginscan(rel, ActiveSnapshotSet() ?
+												 GetActiveSnapshot() :
+												 GetTransactionSnapshot(),
+												 0, NULL, SO_NONE);
+			TupleTableSlot *slot = table_slot_create(rel, NULL);
+
+			has_rows = table_scan_getnextslot(scan, ForwardScanDirection, slot);
+			ExecDropSingleTupleTableSlot(slot);
+			table_endscan(scan);
+		}
+		table_close(rel, NoLock);
+		if (has_rows)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot fill the existing rows of table \"%s\" from a sequence",
+							stmt->relation->relname),
+					 errdetail("Each segment would number its own rows from its own copy of the sequence."),
+					 errhint("Add the column without a default that takes the sequence's values, fill it with UPDATE, and then set the default.")));
+	}
 }
 
 static void
@@ -1885,6 +2009,8 @@ gp_ddl_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	{
 		PG_TRY();
 		{
+			if (IsA(parsetree, AlterTableStmt))
+				refuse_sequence_fill((AlterTableStmt *) parsetree);
 			run_tablespace_statement(pstmt, queryString, readOnlyTree, context,
 									 params, queryEnv, dest, qc, true);
 

@@ -3945,6 +3945,25 @@ COMMIT;"
 		&& ok "a DO ALSO rule's action runs once, for an UPDATE sent whole and for the explicit write's" \
 		|| notok "a rule's action and a write the segments are sent" "$out / plan $plan"
 
+	# ALTER TABLE ... ADD COLUMN d serial, of a table with rows: each segment
+	# numbered its own rows from its own copy of the sequence, 1 and on,
+	# where Cloudberry's take the values from the coordinator.  Refused, as
+	# is an identity column added and a nextval() default; a table with no
+	# rows takes the column, and the rows it is given later their values
+	# from the coordinator.
+	q 0 "CREATE TABLE sqf (a int) DISTRIBUTED BY (a); INSERT INTO sqf SELECT generate_series(1, 20);
+	     CREATE SEQUENCE sqf_s;" >/dev/null
+	out=""
+	for add in "d serial" "d int GENERATED ALWAYS AS IDENTITY" "d bigint DEFAULT nextval('sqf_s')"; do
+		out="$out$(q 0 "ALTER TABLE sqf ADD COLUMN $add;" | grep -c 'cannot fill the existing rows of table "sqf" from a sequence')"
+	done
+	out2=$(q 0 "SELECT count(*) FROM gp_dist_random('pg_attribute') WHERE attrelid = 'sqf'::regclass AND attname = 'd';")
+	out3=$(q 0 "CREATE TABLE sqe (a int) DISTRIBUTED BY (a); ALTER TABLE sqe ADD COLUMN d serial;
+	            INSERT INTO sqe SELECT generate_series(1, 20); SELECT count(DISTINCT d) || ' ' || max(d) FROM sqe;")
+	[ "$out|$out2|$out3" = "111|0|20 20" ] \
+		&& ok "ALTER TABLE refuses to number a distributed table's rows on each segment from a sequence, and an empty table takes the column" \
+		|| notok "ADD COLUMN serial on the segments" "$out / $out2 / $out3"
+
 	# A correlated scalar subquery of an aggregate, which the planner would
 	# run for each row -- a gather of the table at each -- is a join with its
 	# rows grouped by the correlation, as Cloudberry's planner makes it

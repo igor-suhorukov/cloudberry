@@ -65,7 +65,11 @@ What the port refuses otherwise than Cloudberry.  An exclusion constraint's
 index is checked against the distribution once it is built, so PAX refuses
 its gist index first (gpdist_opclasses); COPY FROM ... WHERE into a
 distributed table; a subquery in ON CONFLICT DO UPDATE; an index built
-CONCURRENTLY on a PAX table.
+CONCURRENTLY on a PAX table; an identity column added to a table that has
+rows (identity), whose segments would each number their own rows from
+their own copy of the sequence, and the coordinator's would not move on
+(gp_ddl.c) -- where the rows happen to be on one segment, as itest13's
+are, the numbers were right, and the sequence still behind them.
 
 What the port answers as PostgreSQL does where PAX's expected output does
 not.  A DO ALSO rule's INSERT, which the rows a function's INSERT writes run

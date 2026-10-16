@@ -1,4 +1,19 @@
 @@
++DETAIL:  Each segment would number its own rows from its own copy of the sequence.
++ERROR:  cannot fill the existing rows of table "itest13" from a sequence
++HINT:  Add the column without a default that takes the sequence's values, fill it with UPDATE, and then set the default.
+@@
+- a | b | c 
+----+---+---
+- 1 | 1 | 1
+- 2 | 2 | 2
+- 3 | 3 | 3
+-(3 rows)
+-
++ERROR:  column "c" does not exist
++LINE 1: SELECT a,b,c FROM itest13;
++                   ^
+@@
 -ERROR:  identity column type must be smallint, integer, or bigint
 +ERROR:  cannot alter type of a column used in a distribution policy
 @@
@@ -30,6 +45,12 @@
 + integer |     1 |       1 | 2147483647 |         1 | no      |     1
 +Sequence for identity column: public.itest17.c
 +
+@@
++DETAIL:  Each segment would number its own rows from its own copy of the sequence.
++ERROR:  cannot fill the existing rows of table "itest3" from a sequence
++HINT:  Add the column without a default that takes the sequence's values, fill it with UPDATE, and then set the default.
+@@
+- c      | integer |           | not null | generated always as identity
 @@
 +Not-null constraints:
 +    "itest8_f2_not_null" NOT NULL "f2"
