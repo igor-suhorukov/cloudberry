@@ -1268,6 +1268,18 @@ if get_option('hook_tests')
   )
   built_modules += 'gp_oauth_probe and gp_oauth_client (test only)'
 
+  # Two table access methods the orca suite has ORCA plan tables of: heap's
+  # routine with virtual slots, and heap's without its bitmap scan.
+  shared_module('orca_test_am', files('test/orca/orca_test_am.c'),
+    c_args: mod_c_args,
+    link_args: mod_link_args,
+    include_directories: [pg_inc, cb_inc],
+    name_prefix: '',
+    install: true,
+    install_dir: pg_pkglibdir,
+  )
+  built_modules += 'orca_test_am (test only)'
+
   # The client Cloudberry's resource_queue test runs, a libpq program of its
   # suite's, compiled where it lies, unmodified (it declares a variable it
   # does not use): the greenplum suite runs it from where it is installed.

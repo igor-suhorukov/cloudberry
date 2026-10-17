@@ -240,6 +240,14 @@ private:
 	// storage type for a relation
 	static IMDRelation::Erelstoragetype RetrieveRelStorageType(Relation rel);
 
+	// does a test hold of a table a scan of a relation reads: it, or one of
+	// its partitions
+	static BOOL AnyTableRead(Relation rel, BOOL (*test)(Relation));
+
+	// is a table of an access method whose index scans ORCA would plan and
+	// the method cannot run, or ORCA cannot price
+	static BOOL IndexScansUnfit(Relation rel);
+
 	// fix frequencies if they add up to more than 1.0
 	static void NormalizeFrequencies(float4 *pdrgf, ULONG length,
 									 CDouble *null_freq);

@@ -4107,5 +4107,96 @@ same "a join of two buckets of half a value each" \
      "SELECT count(*) FROM st_h1 JOIN st_h2 USING (a) WHERE st_h1.a = 3"
 
 echo
+echo "28. a table of any other access method, planned by ORCA"
+###############################################################################
+# NOT IN CLOUDBERRY, whose ORCA declines every table access method but heap,
+# ao_row, ao_column and pax ("Unsupported table AM").  The relcache translator
+# takes any other for one of the two kinds of table ORCA's core tells apart:
+# heap, a block table, where the method's slots hold heap tuples, and a
+# non-block table, as PAX, where they do not.  It gives ORCA none of the
+# indexes of a table whose method cannot run a bitmap scan, or is taken for a
+# non-block table without being Cloudberry's, whose index scans ORCA would
+# price as an append-optimized table's (RetrieveRelStorageType,
+# RetrieveRelIndexInfo).  orca_test_am's two methods are heap's routine,
+# changed where the translator asks: orca_virtual_am's slots are virtual, as
+# an extension's own method's are (ch_table_engines' mergetree), and
+# orca_nobitmap_am has no bitmap scan, which PostgreSQL 19 leaves optional.
+# A table of orca_virtual_am can be made, indexed, written and planned, but
+# not read -- heap's scans store a heap tuple into the scan's slot -- so its
+# checks plan it, and run only what reads no row of it.
+
+q "CREATE FUNCTION orca_virtual_am_handler(internal) RETURNS table_am_handler
+     AS 'orca_test_am' LANGUAGE C;
+   CREATE FUNCTION orca_nobitmap_am_handler(internal) RETURNS table_am_handler
+     AS 'orca_test_am' LANGUAGE C;
+   CREATE ACCESS METHOD orca_virtual_am TYPE TABLE HANDLER orca_virtual_am_handler;
+   CREATE ACCESS METHOD orca_nobitmap_am TYPE TABLE HANDLER orca_nobitmap_am_handler;
+   CREATE ACCESS METHOD orca_heap2 TYPE TABLE HANDLER heap_tableam_handler;
+   CREATE TABLE tam_v (a int, b text) USING orca_virtual_am
+     WITH (autovacuum_enabled = off);
+   CREATE INDEX tam_v_a ON tam_v (a);
+   INSERT INTO tam_v SELECT i, 'v' FROM generate_series(1, 100) i;
+   SELECT pg_restore_relation_stats('schemaname', 'public', 'relname', 'tam_v',
+       'relpages', 1000::integer, 'reltuples', 100000::real, 'relallvisible', 0::integer);
+   CREATE TABLE tam_h2 (a int, b text) USING orca_heap2;
+   CREATE INDEX tam_h2_a ON tam_h2 (a);
+   INSERT INTO tam_h2 SELECT i, 'h' FROM generate_series(1, 10000) i;
+   CREATE TABLE tam_nb (a int, b text) USING orca_nobitmap_am;
+   CREATE INDEX tam_nb_a ON tam_nb (a);
+   INSERT INTO tam_nb SELECT i, 'n' FROM generate_series(1, 10000) i;
+   CREATE TABLE tam_mix (a int, b text) PARTITION BY RANGE (a);
+   CREATE TABLE tam_mix_h PARTITION OF tam_mix FOR VALUES FROM (0) TO (100);
+   CREATE TABLE tam_mix_v PARTITION OF tam_mix FOR VALUES FROM (100) TO (200)
+     USING orca_virtual_am;
+   CREATE INDEX tam_mix_a ON tam_mix (a);" > /dev/null
+q "VACUUM ANALYZE tam_h2;" > /dev/null
+q "VACUUM ANALYZE tam_nb;" > /dev/null
+
+# tam <name> <table> <kind and count>: the kind the translator takes the
+# table for, and how many of its indexes ORCA has.
+tam() {
+	is "$1" \
+	   "SELECT substring(gp_orca.md_dxl('relation', '$2'::regclass) from 'StorageType=\"[^\"]*\"')
+	           || ' ' || (SELECT count(*) FROM regexp_matches(
+	                          gp_orca.md_dxl('relation', '$2'::regclass), '<dxl:IndexInfo ', 'g'));" \
+	   "$3"
+}
+
+tam "heap's handler under another name is a heap table, its index ORCA's" \
+    tam_h2 'StorageType="Heap" 1'
+
+shape "  which ORCA scans as it scans heap's" "Index" \
+      "SELECT b FROM tam_h2 WHERE a = 7"
+
+tam "a method of virtual slots is a non-block table, and ORCA has none of its indexes" \
+    tam_v 'StorageType="PAX" 0'
+
+has "  a query of it is ORCA's" \
+    "EXPLAIN (COSTS OFF) SELECT b FROM tam_v WHERE a = 7;" "Optimizer: GPORCA"
+
+has "  and scans the table" \
+    "EXPLAIN (COSTS OFF) SELECT b FROM tam_v WHERE a = 7;" "Seq Scan on tam_v"
+
+# A virtual slot has a row's ctid and tableoid, and no xmin: the column is not
+# ORCA's, which says so as it does of an append-optimized table's, and the
+# planner plans the query.  WHERE false reads no row of it.
+declined "  its xmin, which a virtual slot has not, is the planner's" \
+         "SELECT xmin FROM tam_v WHERE false" "No variable entry found"
+
+has "  a row written into it is ORCA's" \
+    "EXPLAIN (COSTS OFF) INSERT INTO tam_v VALUES (101, 'w');" "Optimizer: GPORCA"
+
+is "  and written" "INSERT INTO tam_v VALUES (101, 'w');" ""
+
+tam "a heap-like method without bitmap scans is heap, and ORCA has none of its indexes" \
+    tam_nb 'StorageType="Heap" 0'
+
+shape "  so ORCA scans the table, and answers as the planner does" "Seq Scan on public.tam_nb" \
+      "SELECT b FROM tam_nb WHERE a = 7"
+
+tam "a partitioned table with a partition of such a method is mixed, and ORCA has none of its indexes" \
+    tam_mix 'StorageType="MixedPartitioned" 0'
+
+echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

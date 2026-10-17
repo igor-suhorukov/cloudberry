@@ -508,6 +508,15 @@ bool IsSingleNode(void);
 // is -- so it is safe to ask of any relam.
 bool IsAccessMethodNamed(Oid am_oid, const char *am_name);
 
+// does a table's access method hand its rows over in slots of heap tuples,
+// which have xmin, cmin, xmax and cmax?  False for a relation with none.
+bool TableAmKeepsHeapTuples(Relation rel);
+
+// can a table's access method read a bitmap of an index's TIDs -- a bitmap
+// heap scan -- which PostgreSQL 19 leaves optional?  False for a relation
+// with none.
+bool TableAmHasBitmapScans(Relation rel);
+
 // heap attribute is null
 bool HeapAttIsNull(HeapTuple tup, int attnum);
 

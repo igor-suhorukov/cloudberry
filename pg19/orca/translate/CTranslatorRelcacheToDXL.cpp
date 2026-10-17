@@ -275,6 +275,15 @@ CTranslatorRelcacheToDXL::RetrieveRelIndexInfo(CMemoryPool *mp, Relation rel)
 	GPOS_ASSERT(nullptr != rel);
 	CMDIndexInfoArray *md_index_info_array = GPOS_NEW(mp) CMDIndexInfoArray(mp);
 
+	// NOT IN CLOUDBERRY: none of a table, or of a partitioned table with a
+	// partition, whose access method ORCA would plan an index's scan of that
+	// the method cannot run, or runs at a cost ORCA cannot price
+	// (IndexScansUnfit).
+	if (AnyTableRead(rel, IndexScansUnfit))
+	{
+		return md_index_info_array;
+	}
+
 	// not a partitioned table: obtain indexes directly from the catalog
 	List *index_oids = gpdb::GetRelationIndexes(rel);
 
@@ -2843,12 +2852,105 @@ CTranslatorRelcacheToDXL::RetrieveRelStorageType(Relation rel)
 				rel_storage_type = IMDRelation::ErelstorageAppendOnlyRows;
 				break;
 			}
-			GPOS_RAISE(gpdxl::ExmaMD, gpdxl::ExmiMDObjUnsupported,
-					   GPOS_WSZ_LIT("Unsupported table AM"));
+
+			// NOT IN CLOUDBERRY, which declines any other access method:
+			// an extension's -- ch_table_engines' mergetree, datalake_fdw's
+			// iceberg -- taken for one of the two kinds of table ORCA's core
+			// tells apart, which is all it asks of a table's storage.  A
+			// block table, heap, has the system columns of a heap tuple and
+			// any scan of its indexes; a non-block one, append-optimized or
+			// PAX (IMDRelation::IsNonBlockTable()), has only the ctid and
+			// tableoid (AddSystemColumns(), CheckSafeTargetListForAOTables()),
+			// and its indexes are read through bitmaps, or by a bitmap
+			// index's own scan (CXformIndexGet2IndexScan).  A method whose
+			// slots hold heap tuples is taken for heap -- heap2 of
+			// PostgreSQL's own tests is heap under another name -- and any
+			// other for a non-block table, as PAX: the core's list of kinds
+			// is in one of its headers, which the port does not copy
+			// (meson.build), and nothing asks for PAX by the kind but for
+			// what makes it non-block.  The scans of an index ORCA would plan
+			// for such a table it would price as an append-optimized table's,
+			// and so it is given none of its indexes (RetrieveRelIndexInfo).
+			rel_storage_type = gpdb::TableAmKeepsHeapTuples(rel)
+								   ? IMDRelation::ErelstorageHeap
+								   : IMDRelation::ErelstoragePAX;
+			break;
 		}
 	}
 
 	return rel_storage_type;
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorRelcacheToDXL::AnyTableRead
+//
+//	@doc:
+//		Does "test" hold of a table a scan of rel reads: rel itself, or,
+//		for a partitioned table, any of its partitions but a foreign one,
+//		which ORCA scans apart (CXformExpandDynamicGetWithForeignPartitions)
+//
+//---------------------------------------------------------------------------
+BOOL
+CTranslatorRelcacheToDXL::AnyTableRead(Relation rel, BOOL (*test)(Relation))
+{
+	if (rel->rd_rel->relkind == RELKIND_FOREIGN_TABLE)
+	{
+		return false;
+	}
+	if (rel->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
+	{
+		return test(rel);
+	}
+
+	PartitionDesc part_desc = gpdb::RelationGetPartitionDesc(rel, true);
+	for (int i = 0; part_desc != nullptr && i < part_desc->nparts; i++)
+	{
+		gpdb::RelationWrapper part = gpdb::GetRelation(part_desc->oids[i]);
+
+		if (part && AnyTableRead(part.get(), test))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorRelcacheToDXL::IndexScansUnfit
+//
+//	@doc:
+//		Is a table of an access method whose indexes ORCA would plan a scan
+//		of that the method cannot run, or runs at a cost ORCA cannot price:
+//
+//		one that cannot read a bitmap of TIDs, which PostgreSQL 19 leaves
+//		optional and its own planner then plans no bitmap scan for
+//		(get_relation_info(), amhasgetbitmap), where ORCA asks no such
+//		question;
+//
+//		one other than Cloudberry's taken for a non-block table
+//		(RetrieveRelStorageType), whose index scans ORCA prices as an
+//		append-optimized table's -- a bitmap's heap scan reading blocks, an
+//		index-only scan never reading the table -- where such a method
+//		fetches each row by its TID at a cost of its own: in
+//		ch_table_engines' mergetree, a granule of every column, 11 to 20 ms
+//		a row (ch_table_engines.md, "Transfer and statistics, measured
+//		2026-10-17").  Its rows are read by its scan, which a vector
+//		engine's source may prune by the scan's conditions.
+//
+//---------------------------------------------------------------------------
+BOOL
+CTranslatorRelcacheToDXL::IndexScansUnfit(Relation rel)
+{
+	if (rel->rd_rel->relkind != RELKIND_RELATION &&
+		rel->rd_rel->relkind != RELKIND_MATVIEW)
+	{
+		return false;
+	}
+	return !gpdb::TableAmHasBitmapScans(rel) ||
+		   (RetrieveRelStorageType(rel) == IMDRelation::ErelstoragePAX &&
+			!gpdb::IsAccessMethodNamed(rel->rd_rel->relam, "pax"));
 }
 
 //---------------------------------------------------------------------------

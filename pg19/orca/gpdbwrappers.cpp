@@ -69,6 +69,7 @@ extern "C" {
 #include "access/genam.h"
 #include "access/htup_details.h"
 #include "access/parallel.h"
+#include "access/tableam.h"
 #include "access/transam.h"
 #include "catalog/pg_aggregate.h"
 #include "catalog/pg_am.h"
@@ -1390,6 +1391,41 @@ gpdb::IsAccessMethodNamed(Oid am_oid, const char *am_name)
 	}
 	GP_WRAP_END;
 	return false;
+}
+
+bool
+gpdb::TableAmKeepsHeapTuples(Relation rel)
+{
+	// Any slot gives a row's ctid and tableoid; the other system columns
+	// come from the tuple in it, which a slot that holds no heap tuple -- a
+	// virtual one, an extension's own -- does not have, and asking it for
+	// one is an error (slot_getsysattr()).  Heap's slots hold one, and so do
+	// those of an access method built on heap's, such as heap2 of
+	// PostgreSQL's own tests and the port's gp_probe_am.  The callback may
+	// be an extension's, and may raise an error.
+	GP_WRAP_START;
+	{
+		const TupleTableSlotOps *ops;
+
+		if (rel->rd_tableam == nullptr)
+		{
+			return false;
+		}
+		ops = table_slot_callbacks(rel);
+		return ops == &TTSOpsBufferHeapTuple || ops == &TTSOpsHeapTuple;
+	}
+	GP_WRAP_END;
+	return false;
+}
+
+bool
+gpdb::TableAmHasBitmapScans(Relation rel)
+{
+	// What PostgreSQL 19's own planner asks of a table before it plans a
+	// bitmap scan of any of its indexes (get_relation_info(),
+	// amhasgetbitmap).  Reads the relcache entry alone.
+	return rel->rd_tableam != nullptr &&
+		   rel->rd_tableam->scan_bitmap_next_tuple != nullptr;
 }
 
 bool
