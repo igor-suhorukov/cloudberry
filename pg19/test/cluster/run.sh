@@ -6195,24 +6195,41 @@ echo "22. parallelism within a segment"
 if [ "$started" -eq 1 ]; then
 	par_started=1
 	for n in 1 2 0; do
-		start_node "$n" "shared_preload_libraries = '$PRELOAD,gp_orca,gp_ao,pax'" \
+		start_node "$n" "shared_preload_libraries = '$PRELOAD,gp_orca,gp_ao,pax,orca_test_am'" \
 			"gp.cluster_secret = '$SECRET'" "max_worker_processes = 16" \
 			"max_parallel_workers = 8" || par_started=0
 	done
+	# Beside them, tables of three of orca_test_am's methods, each heap's
+	# routine (test/orca/orca_test_am.c): heap's handler under another name,
+	# one with a vexec batch source registered for it, and one with neither.
 	out=$(q 0 "SET client_min_messages = warning; CREATE EXTENSION IF NOT EXISTS gp_orca;
 			   CREATE EXTENSION gp_ao; CREATE EXTENSION pax;
+			   CREATE FUNCTION orca_source_am_handler(internal) RETURNS table_am_handler
+			     AS 'orca_test_am' LANGUAGE C;
+			   CREATE FUNCTION orca_nobitmap_am_handler(internal) RETURNS table_am_handler
+			     AS 'orca_test_am' LANGUAGE C;
+			   CREATE ACCESS METHOD orca_heap2 TYPE TABLE HANDLER heap_tableam_handler;
+			   CREATE ACCESS METHOD orca_source_am TYPE TABLE HANDLER orca_source_am_handler;
+			   CREATE ACCESS METHOD orca_nobitmap_am TYPE TABLE HANDLER orca_nobitmap_am_handler;
 			   CREATE TABLE ph (a int, b int) WITH (parallel_workers = 2) DISTRIBUTED BY (a);
 			   CREATE TABLE pa (a int, b int) USING ao_row WITH (parallel_workers = 2) DISTRIBUTED BY (a);
 			   CREATE TABLE pc (a int, b int) USING ao_column WITH (parallel_workers = 2) DISTRIBUTED BY (a);
 			   CREATE TABLE pp (a int, b int) USING pax WITH (parallel_workers = 2) DISTRIBUTED BY (a);
+			   CREATE TABLE ptam_h2 (a int, b int) USING orca_heap2 WITH (parallel_workers = 2) DISTRIBUTED BY (a);
+			   CREATE TABLE ptam_src (a int, b int) USING orca_source_am WITH (parallel_workers = 2) DISTRIBUTED BY (a);
+			   CREATE TABLE ptam_nb (a int, b int) USING orca_nobitmap_am WITH (parallel_workers = 2) DISTRIBUTED BY (a);
 			   SET gp.appendonly_insert_files = 4;
 			   INSERT INTO ph SELECT i, i FROM generate_series(1, 300000) i;
 			   INSERT INTO pa SELECT i, i FROM generate_series(1, 300000) i;
 			   INSERT INTO pc SELECT i, i FROM generate_series(1, 300000) i;
 			   INSERT INTO pp SELECT i, i FROM generate_series(1, 300000) i;
-			   ANALYZE ph; ANALYZE pa; ANALYZE pc; ANALYZE pp;")
+			   INSERT INTO ptam_h2 SELECT i, i FROM generate_series(1, 300000) i;
+			   INSERT INTO ptam_src SELECT i, i FROM generate_series(1, 300000) i;
+			   INSERT INTO ptam_nb SELECT i, i FROM generate_series(1, 300000) i;
+			   ANALYZE ph; ANALYZE pa; ANALYZE pc; ANALYZE pp;
+			   ANALYZE ptam_h2; ANALYZE ptam_src; ANALYZE ptam_nb;")
 	if [ "$par_started" -eq 1 ] && [ -z "$out" ]; then
-		ok "the cluster restarts with room for workers, and a heap, an AO row, an AO column and a PAX table of 300,000 rows"
+		ok "the cluster restarts with room for workers, and a heap, an AO row, an AO column, a PAX table and three of orca_test_am's of 300,000 rows"
 	else
 		notok "the cluster for parallelism within a segment" "$out $(tail -3 "$ROOT/node0.log")"
 	fi
@@ -6268,6 +6285,24 @@ if [ "$started" -eq 1 ]; then
 			on "SELECT count(*), sum(b) FROM $t WHERE b % 7 = 0;" \
 			"*Gather Motion 2:1  (slice1; segments: 2)*Gather*Workers Planned: 2*Parallel Seq Scan on $t*"
 	done
+	# Any other method ORCA's parallel pass splits where heap's routine is
+	# its own, or a vexec batch source is registered for it, and only there
+	# (orca/parallel.c, shares_scan()).
+	par_same "ORCA: a Gather over the scan of a table of heap's handler under another name" \
+		on "SELECT count(*), sum(b) FROM ptam_h2 WHERE b % 7 = 0;" \
+		"*Gather Motion 2:1  (slice1; segments: 2)*Gather*Workers Planned: 2*Parallel Seq Scan on ptam_h2*"
+	par_same "ORCA: a Gather over the scan of a table of a method with a vexec batch source" \
+		on "SELECT count(*), sum(b) FROM ptam_src WHERE b % 7 = 0;" \
+		"*Gather Motion 2:1  (slice1; segments: 2)*Gather*Workers Planned: 2*Parallel Seq Scan on ptam_src*"
+	want=$(q 0 "SET gp.optimizer = on; SELECT count(*), sum(b) FROM ptam_nb WHERE b % 7 = 0;")
+	got=$(q 0 "SET gp.optimizer = on; $PAR SELECT count(*), sum(b) FROM ptam_nb WHERE b % 7 = 0;")
+	plan=$(q 0 "SET gp.optimizer = on; $PAR EXPLAIN (COSTS OFF) SELECT count(*), sum(b) FROM ptam_nb WHERE b % 7 = 0;")
+	if [ -n "$want" ] && [ "$got" = "$want" ] && [[ "$plan" == *"Optimizer: GPORCA"* ]] &&
+		[[ "$plan" != *"Workers Planned"* ]]; then
+		ok "ORCA: no Gather over the scan of a table of a method with neither"
+	else
+		notok "a method with neither, not split" "[$got] [$want] $plan"
+	fi
 	par_same "ORCA: the rows of a scan in the writer's slice, through a Gather" \
 		on "SELECT a, b FROM ph WHERE b % 7 = 0 ORDER BY a;" \
 		"*Gather Motion*Gather*Workers Planned: 2*Parallel Seq Scan on ph*"

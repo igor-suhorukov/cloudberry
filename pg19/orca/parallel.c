@@ -42,7 +42,8 @@
  *   in the fragment, a Gather goes over the largest subtree its
  *   participants can split, where PostgreSQL's planner would find that
  *   pays: a sequential scan of a table whose storage shares itself among a
- *   parallel scan's participants -- heap, ao_row, ao_column, pax -- made
+ *   parallel scan's participants -- heap, ao_row, ao_column, pax, and any
+ *   other method with a vexec batch source (shares_scan()) -- made
  *   parallel-aware, under the outer sides of hash joins whose inner sides
  *   each participant reads whole and hashes (a parallel-oblivious join, as
  *   PostgreSQL's planner makes one), all of whose expressions a worker may
@@ -71,7 +72,8 @@
  *   join, projection, aggregation and sort as PostgreSQL's -- so that a
  *   plan of vector nodes gets the Gathers ORCA's plan of row nodes would,
  *   and the engine's scans below them share their tables among the
- *   Gather's participants (pg_vector_executor.md §3.10, V4).
+ *   Gather's participants (pg_vector_executor.md §3.10, V4), as many as the
+ *   engine gives its scan where it says (engine_workers()).
  *
  * Only a SELECT that may run in parallel mode, as PostgreSQL's planner asks
  * (standard_planner()): CURSOR_OPT_PARALLEL_OK, which a cursor lacks, no
@@ -117,6 +119,7 @@
 #include "gp_motion.h"
 #include "gp_orca_parallel.h"
 #include "gp_orca_vec.h"
+#include "vexec_source.h"
 
 typedef struct OrcaParallel
 {
@@ -211,15 +214,28 @@ max_node_id(Plan *plan)
 	return max;
 }
 
-/* A table access method that shares a scan among its participants. */
+/*
+ * A table whose access method shares a scan among its participants: heap,
+ * under any name its handler is given, ao_row, ao_column and pax -- and,
+ * NOT IN CLOUDBERRY, any other that has a vexec batch source
+ * (vexec_source.h), as ch_table_engines' mergetree has.  vexec's planner
+ * route already splits such a table's scan among a Gather's participants
+ * (its paths.c, a partial VecScan), and its source reads through the
+ * method's own scan, begun parallel-aware as a SeqScan's is
+ * (table_beginscan_parallel()); the module that registered it is in
+ * "shared_preload_libraries", which a source's registration asks.
+ */
 static bool
-shares_scan(Oid amoid)
+shares_scan(Relation rel)
 {
-	char	   *name = get_am_name(amoid);
+	char	   *name = get_am_name(rel->rd_rel->relam);
 
-	return name != NULL &&
-		(strcmp(name, "heap") == 0 || strcmp(name, "ao_row") == 0 ||
-		 strcmp(name, "ao_column") == 0 || strcmp(name, "pax") == 0);
+	if (rel->rd_tableam == GetHeapamTableAmRoutine() ||
+		(name != NULL &&
+		 (strcmp(name, "ao_row") == 0 || strcmp(name, "ao_column") == 0 ||
+		  strcmp(name, "pax") == 0)))
+		return true;
+	return rel->rd_tableam != NULL && vexec_find_source(rel->rd_tableam) != NULL;
 }
 
 /*
@@ -257,6 +273,35 @@ worker_reads(OrcaParallel *op, Scan *scan)
 		get_rel_persistence(rte->relid) != RELPERSISTENCE_TEMP;
 }
 
+/*
+ * The workers a vector engine gives its own scan of rel, the driver of a
+ * split subtree, where PostgreSQL's rule gives "workers" (gp_orca_vec.h,
+ * scan_workers, from its minor version 3): NOT IN CLOUDBERRY, the engine's
+ * rule on PostgreSQL's planner's route, so that ORCA's plan gets as many as
+ * the planner's would -- vexec gives a source's scan a worker for every
+ * vexec.scan_rows_per_worker rows, where PostgreSQL's rule of a column
+ * store's compressed pages gives few.  A SeqScan, and a scan of an engine
+ * without the member, keep "workers".
+ */
+static int
+engine_workers(Scan *scan, Relation rel, Share *share, int workers)
+{
+	const GpOrcaVecRoutine *engine;
+	GpOrcaVecNode vn;
+	int			answer;
+
+	if (!IsA(scan, CustomScan) || vec_kind(&scan->plan, &vn) != GP_ORCA_VEC_SEQSCAN)
+		return workers;
+	engine = gp_orca_vec_find();
+	if (engine == NULL || !GP_ORCA_VEC_HAS(engine, scan_workers))
+		return workers;
+	answer = engine->scan_workers(&scan->plan, rel, share->pages, share->tuples,
+								  workers);
+	if (answer < 0)
+		return workers;
+	return Min(answer, max_parallel_workers_per_gather);
+}
+
 /* A sequential scan that can drive a split subtree, and its share. */
 static bool
 scan_share(OrcaParallel *op, Scan *scan, Share *share)
@@ -268,7 +313,7 @@ scan_share(OrcaParallel *op, Scan *scan, Share *share)
 	if (!worker_reads(op, scan))
 		return false;
 	rel = table_open(rte->relid, AccessShareLock);
-	if (!shares_scan(rel->rd_rel->relam) || rel->rd_rel->reltuples < 0)
+	if (!shares_scan(rel) || rel->rd_rel->reltuples < 0)
 	{
 		table_close(rel, NoLock);
 		return false;
@@ -279,9 +324,10 @@ scan_share(OrcaParallel *op, Scan *scan, Share *share)
 	dummy = makeNode(RelOptInfo);
 	dummy->reloptkind = RELOPT_BASEREL;
 	dummy->rel_parallel_workers = RelationGetParallelWorkers(rel, -1);
-	table_close(rel, NoLock);
 	share->workers = compute_parallel_worker(dummy, share->pages, -1,
 											 max_parallel_workers_per_gather);
+	share->workers = engine_workers(scan, rel, share, share->workers);
+	table_close(rel, NoLock);
 	share->divisor = share->workers;
 	if (parallel_leader_participation && 1.0 - 0.3 * share->workers > 0)
 		share->divisor += 1.0 - 0.3 * share->workers;

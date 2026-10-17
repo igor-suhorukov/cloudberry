@@ -53,6 +53,23 @@ joined bucket's frequency over one, from a fraction of a value in each bucket
 that changes the original is carried into the copy by hand. The orca suite's
 section 27 checks both.
 
+Cloudberry's ORCA plans tables of heap, `ao_row`, `ao_column` and PAX, and
+declines every other table access method ("Unsupported table AM"). The
+port's relcache translator takes any other for one of the two kinds of table
+ORCA's core tells apart, which is all the core asks of a table's storage:
+heap, where the method's slots hold heap tuples, and a non-block table, as
+PAX, where they do not — so that an extension's method, ch_table_engines'
+`mergetree` among them, is ORCA's to plan. ORCA is given none of the indexes
+of a table whose method has no bitmap scan, which PostgreSQL 19 leaves
+optional, or which it takes for a non-block table without its being
+Cloudberry's, whose index scans it would price as an append-optimized
+table's. Within a segment, a scan of a method with a vexec batch source is
+split among a Gather's participants as heap's is (`orca/parallel.c`), and a
+vector engine may give its own scan's number of workers
+(`include/gp_orca_vec.h`, `scan_workers`). The orca suite's section 28
+checks the first two with two methods made of heap's routine
+(`test/orca/orca_test_am.c`).
+
 ## What is built
 
 Each module is a shared library built against the **patched** PostgreSQL 19

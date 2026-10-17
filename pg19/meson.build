@@ -1268,8 +1268,9 @@ if get_option('hook_tests')
   )
   built_modules += 'gp_oauth_probe and gp_oauth_client (test only)'
 
-  # Two table access methods the orca suite has ORCA plan tables of: heap's
-  # routine with virtual slots, and heap's without its bitmap scan.
+  # Table access methods the orca and cluster suites have ORCA plan tables
+  # of: heap's routine with virtual slots, heap's without its bitmap scan,
+  # and heap's with a stand-in vexec batch source.
   shared_module('orca_test_am', files('test/orca/orca_test_am.c'),
     c_args: mod_c_args,
     link_args: mod_link_args,
