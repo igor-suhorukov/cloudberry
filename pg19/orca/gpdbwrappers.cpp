@@ -4234,7 +4234,9 @@ gpdb::MakeRowSegmentCheck(Expr *ctid, Expr *segid, Expr *action)
 //	max_parallel_workers_per_gather.  The port answers no: decision 2 defers
 //	intra-segment parallelism until after M7, and says the first variant
 //	tried then is a PostgreSQL Gather inside each segment process, which
-//	needs no answer here at all.
+//	needs no answer here at all: a pass over ORCA's finished plan puts it
+//	there (parallel.c), and on one node into the backend's plan, where
+//	Cloudberry answers no too.
 //
 //	Cloudberry's parallel xforms are compiled in regardless -- they come with
 //	the core, which the port takes whole -- so this is the switch that keeps

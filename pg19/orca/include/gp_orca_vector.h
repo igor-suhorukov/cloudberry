@@ -71,6 +71,12 @@ extern bool gp_orca_vector_cost_hash_key(Oid eqop, Oid collation);
 extern Plan *gp_orca_vector_plan(Plan *plan, List *subplans, List *rtable,
 								 List *windows);
 
+/*
+ * A node a pass over the finished plan made, its children offered already:
+ * the engine's node in its place, or the node.
+ */
+extern Plan *gp_orca_vector_offer(Plan *plan, List *rtable);
+
 #ifdef __cplusplus
 }
 #endif

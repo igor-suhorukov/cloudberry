@@ -84,6 +84,7 @@
 #include "gp_core_api.h"
 #include "gp_orca_api.h"
 #include "gp_orca_guc.h"
+#include "gp_orca_parallel.h"
 #include "gp_orca_planner.h"
 #ifdef GP_ORCA_SINGLE_NODE
 #include "gp_orca_single_node.h"
@@ -1449,6 +1450,7 @@ _PG_init(void)
 
 	GpOrcaDefineSettings();
 	GpOrcaInstallPlannerHook();
+	GpOrcaParallelInit();
 
 	/* The executor nodes ORCA's plans use that PostgreSQL 19 does not have. */
 	gp_orca_register_assert();

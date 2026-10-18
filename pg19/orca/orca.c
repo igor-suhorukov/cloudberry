@@ -1715,7 +1715,7 @@ optimize_query(Query *parse, int cursorOptions, ParamListInfo boundParams,
 		}
 	}
 
-	/* Gathers in the fragments a segment's writer runs (parallel.c) */
+	/* Gathers in the fragments a segment's writer runs, or on one node in the plan (parallel.c) */
 	GpOrcaParallelize(result, parse, cursorOptions);
 
 	/*

@@ -18,7 +18,7 @@
  * under the License.
  *
  * gp_orca_parallel.h
- *	  Parallelism within a segment, under ORCA.
+ *	  Parallelism within a segment, under ORCA, and on one node.
  *
  * See parallel.c.  Called from orca.c, on the plan ORCA made.
  *
@@ -31,11 +31,17 @@
 #include "nodes/plannodes.h"
 
 /*
- * Put PostgreSQL's Gathers into the fragments a segment's writer runs, where
- * parallelism within a segment is on and they pay: "query" is the query
- * ORCA was handed, "cursorOptions" the planner's.
+ * Put PostgreSQL's Gathers into the fragments a segment's writer runs, or on
+ * one node into the plan, where gp.enable_parallel is on and they pay:
+ * "query" is the query ORCA was handed, "cursorOptions" the planner's.
  */
 extern void GpOrcaParallelize(PlannedStmt *stmt, Query *query,
 							  int cursorOptions);
+
+/*
+ * From _PG_init: on one node, a plan made with Gathers runs without them
+ * where gp.enable_parallel is off as it starts.
+ */
+extern void GpOrcaParallelInit(void);
 
 #endif							/* GP_ORCA_PARALLEL_H */

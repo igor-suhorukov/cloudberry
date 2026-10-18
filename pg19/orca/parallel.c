@@ -75,13 +75,53 @@
  *   Gather's participants (pg_vector_executor.md §3.10, V4), as many as the
  *   engine gives its scan where it says (engine_workers()).
  *
+ * NOT IN CLOUDBERRY, whose ORCA makes no parallel plan on one node
+ * (gpdb::IsParallelModeOK()): on one node -- gp_orca's single-node build,
+ * or gp_core with no segments -- the backend runs the whole plan, as it
+ * runs the planner's, and the plan is the one fragment:
+ *
+ *   the same Gathers, over the same subtrees, where they pay;
+ *
+ *   an aggregate ORCA plans in one stage, as it plans every aggregate on
+ *   one node, done in two over a subtree a Gather's participants split,
+ *   as PostgreSQL's planner splits it: its partial stage in each
+ *   participant, below the Gather, and its final stage above it
+ *   (two_stage()), each offered to a vectorized executor as the
+ *   translator's nodes are (gp_orca_vector_offer()); and the partial stage
+ *   of one ORCA planned in two, below a join where ORCA pushed it, inside
+ *   a subtree the participants split, its final stage above the Gather
+ *   (partial_stage());
+ *
+ *   below a Limit, through the nodes that pass its rows on, to the first
+ *   that reads all its input -- a Sort, a plain or hashed Agg, a hashed
+ *   SetOp, a hash join's inner side -- as the coordinator's walk goes down
+ *   to a Gather Motion read whole (below_limit()); and the inner side of a
+ *   NestLoop that runs once, for an outer side of one row (one_row()), or
+ *   that has no parameters of the loop's and is read through a Material,
+ *   which keeps its rows for the loop's next outer row;
+ *
+ *   each Gather with a parameter of its own that a rescan of it changes,
+ *   as the planner's has (rescan_param);
+ *
+ *   the subplans of initplans and of CTEs, which run once, as the nodes
+ *   they belong to do; an initplan's value read below a Gather is computed
+ *   by the backend and passed to its workers (Gather.initParam), as the
+ *   planner's are.
+ *
  * Only a SELECT that may run in parallel mode, as PostgreSQL's planner asks
  * (standard_planner()): CURSOR_OPT_PARALLEL_OK, which a cursor lacks, no
- * data-modifying CTE, no row marks, and nothing parallel-unsafe anywhere --
- * the writer runs its whole fragment in parallel mode.  The coordinator
- * runs no fragment and enters no parallel mode for one (parallelModeNeeded
- * stays false); a segment keeps a fragment's Gathers only in its writer,
- * and only then runs the fragment in parallel mode (gp_parallel.c).
+ * data-modifying CTE, no row marks, nothing parallel-unsafe anywhere, and
+ * not in a parallel worker -- the writer runs its whole fragment in
+ * parallel mode.  The coordinator runs no fragment and enters no parallel
+ * mode for one (parallelModeNeeded stays false); a segment keeps a
+ * fragment's Gathers only in its writer, and only then runs the fragment in
+ * parallel mode (gp_parallel.c).  On one node a plan with a Gather needs
+ * parallel mode, as the planner's does.  Either way gp.enable_parallel
+ * turns it on, Cloudberry's switch of ORCA's parallel plans, which
+ * gp_orca's single-node build defines where gp_core does not; and where it
+ * is off as a plan made with it on starts -- a cached plan -- the plan runs
+ * without its Gathers, on a segment (gp_parallel.c) and on one node
+ * (one_node_executor_start()).
  *
  * Cloudberry sources this file stands in for:
  *	  src/backend/gporca/libgpopt/src/xforms/CXformGet2ParallelTableScan.cpp
@@ -94,20 +134,24 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "access/parallel.h"
 #include "access/table.h"
 #include "catalog/pg_aggregate.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
+#include "executor/executor.h"
 #include "nodes/extensible.h"
 #include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
 #include "nodes/pathnodes.h"
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/paths.h"
 #include "parser/parsetree.h"
+#include "storage/lmgr.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
@@ -119,14 +163,19 @@
 #include "gp_motion.h"
 #include "gp_orca_parallel.h"
 #include "gp_orca_vec.h"
+#include "gp_orca_vector.h"
 #include "vexec_source.h"
 
 typedef struct OrcaParallel
 {
 	PlannedStmt *stmt;
-	PlannerInfo *root;			/* for is_parallel_safe() and cost_qual_eval() */
+	PlannerInfo *root;			/* for is_parallel_safe() and cost_qual_eval();
+								 * on one node, its init_plans the initplans
+								 * of the nodes above the walk's */
 	int			nsegments;
 	int			next_node_id;	/* the plan node id of the next Gather */
+	bool		one_node;		/* the whole plan the backend's */
+	bool		made;			/* a Gather was made */
 } OrcaParallel;
 
 static bool
@@ -389,12 +438,28 @@ whole_in_each(OrcaParallel *op, Plan *plan)
 }
 
 /*
+ * NOT IN CLOUDBERRY.  On one node, ORCA's partial stage of an aggregate
+ * (AGGSPLIT_INITIAL_SERIAL), plain or hashed, whose final stage, above any
+ * Gather over it, combines the states of a group it is handed, however
+ * many participants passed one on -- below a join too, where ORCA's eager
+ * aggregation pushed it (CXformPushPartialAggBelowJoin).
+ */
+static bool
+partial_stage(OrcaParallel *op, Agg *agg)
+{
+	return op->one_node && agg->aggsplit == AGGSPLIT_INITIAL_SERIAL &&
+		(agg->aggstrategy == AGG_PLAIN || agg->aggstrategy == AGG_HASHED) &&
+		agg->groupingSets == NIL && agg->chain == NIL && agg->plan.qual == NIL;
+}
+
+/*
  * Can a subtree be split among a Gather's participants: a sequential scan
  * that shares itself among them, the driver, below the outer sides of hash
  * joins whose inner sides each participant reads whole -- an inner, left,
  * semi or anti join, where an outer row meets every inner row in the one
  * participant that reads it; not a right or full join, whose unmatched
- * inner rows every participant would return -- and projections.
+ * inner rows every participant would return -- and projections; on one
+ * node, partial stages of aggregates too (partial_stage()).
  */
 static bool
 splits(OrcaParallel *op, Plan *plan, Share *share)
@@ -408,12 +473,18 @@ splits(OrcaParallel *op, Plan *plan, Share *share)
 	{
 		case T_SeqScan:
 			return scan_share(op, (Scan *) plan, share);
+		case T_Agg:
+			return partial_stage(op, (Agg *) plan) &&
+				splits(op, plan->lefttree, share);
 		case T_CustomScan:
 			/* a vector engine's: its scan, hash join or projection */
 			switch (vec_kind(plan, &vn))
 			{
 				case GP_ORCA_VEC_SEQSCAN:
 					return scan_share(op, (Scan *) plan, share);
+				case GP_ORCA_VEC_AGG:
+					return partial_stage(op, vn.agg) &&
+						splits(op, plan->lefttree, share);
 				case GP_ORCA_VEC_HASHJOIN:
 					if ((vn.jointype != JOIN_INNER && vn.jointype != JOIN_LEFT &&
 						 vn.jointype != JOIN_SEMI && vn.jointype != JOIN_ANTI) ||
@@ -453,7 +524,8 @@ splits(OrcaParallel *op, Plan *plan, Share *share)
 
 /*
  * The CPU a split subtree spends above its driver on each row, which the
- * participants divide as they divide the scan's: a hash join's probes.
+ * participants divide as they divide the scan's: a hash join's probes, and
+ * a partial stage's transitions, an operator's cost a column.
  */
 static double
 split_cpu(Plan *plan)
@@ -467,9 +539,23 @@ split_cpu(Plan *plan)
 			cpu += plan->lefttree->plan_rows *
 				(cpu_operator_cost * list_length(((HashJoin *) plan)->hashclauses) +
 				 cpu_tuple_cost);
-		else if (IsA(plan, CustomScan) && vec_kind(plan, &vn) == GP_ORCA_VEC_HASHJOIN)
-			cpu += plan->lefttree->plan_rows *
-				(cpu_operator_cost * vn.nhashclauses + cpu_tuple_cost);
+		else if (IsA(plan, Agg))
+			cpu += plan->lefttree->plan_rows * cpu_operator_cost *
+				list_length(plan->targetlist);
+		else if (IsA(plan, CustomScan))
+			switch (vec_kind(plan, &vn))
+			{
+				case GP_ORCA_VEC_HASHJOIN:
+					cpu += plan->lefttree->plan_rows *
+						(cpu_operator_cost * vn.nhashclauses + cpu_tuple_cost);
+					break;
+				case GP_ORCA_VEC_AGG:
+					cpu += plan->lefttree->plan_rows * cpu_operator_cost *
+						list_length(plan->targetlist);
+					break;
+				default:
+					break;
+			}
 	}
 	return cpu;
 }
@@ -541,6 +627,42 @@ make_gather(OrcaParallel *op, Plan *plan, int workers)
 	gather->single_copy = false;
 	gather->invisible = false;
 	gather->initParam = NULL;
+
+	/*
+	 * On one node, the initplans' values read below it, which the backend
+	 * computes and passes to its workers, as the planner's set_param_references()
+	 * finds them
+	 */
+	if (op->one_node && plan->extParam != NULL)
+	{
+		Bitmapset  *set = NULL;
+
+		foreach_node(SubPlan, init, op->root->init_plans)
+			foreach_int(param, init->setParam)
+				set = bms_add_member(set, param);
+		gather->initParam = bms_intersect(plan->extParam, set);
+	}
+
+	/*
+	 * On one node, where a node above may run it again, a parameter of its
+	 * own that a rescan changes, which its parallel-aware scan and the nodes
+	 * above that scan below it depend on, so that they are rescanned as
+	 * they run again, once the scan's shared state is reset -- the
+	 * planner's Gather's (assign_special_exec_param(), finalize_plan())
+	 */
+	if (op->one_node)
+	{
+		gather->rescan_param = list_length(op->stmt->paramExecTypes);
+		op->stmt->paramExecTypes = lappend_oid(op->stmt->paramExecTypes, InvalidOid);
+		for (Plan *below = plan; below != NULL; below = below->lefttree)
+		{
+			below->extParam = bms_add_member(bms_copy(below->extParam), gather->rescan_param);
+			below->allParam = bms_add_member(bms_copy(below->allParam), gather->rescan_param);
+			if (below->parallel_aware)
+				break;
+		}
+	}
+	op->made = true;
 	return &gather->plan;
 }
 
@@ -672,20 +794,382 @@ three_stage(OrcaParallel *op, Plan *lower, Agg *agg)
 	return &upper->plan;
 }
 
+/* The Aggrefs of an expression, each once (equal()). */
+static bool
+collect_aggrefs(Node *node, List **aggrefs)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Aggref))
+	{
+		if (!list_member(*aggrefs, node))
+			*aggrefs = lappend(*aggrefs, node);
+		return false;			/* no aggregate is inside another */
+	}
+	return expression_tree_walker(node, collect_aggrefs, aggrefs);
+}
+
+typedef struct FinalStage
+{
+	Agg		   *agg;			/* ORCA's, in one stage */
+	List	   *aggrefs;		/* its Aggrefs, collect_aggrefs()'s */
+	List	   *partial;		/* the partial stage's target list: the
+								 * keys, then a state for each of aggrefs */
+	bool		failed;			/* a column that is no group's key */
+} FinalStage;
+
+/*
+ * An expression of the aggregate in one stage, made the final stage's over
+ * the partial stage's columns: a group's key that stage's column of it, an
+ * aggregate the state that stage passes on, combined and finished
+ * (PostgreSQL's convert_combining_aggrefs(), and setrefs.c's references to
+ * the partial stage's columns).
+ */
+static Node *
+final_mutator(Node *node, FinalStage *fs)
+{
+	if (node == NULL)
+		return NULL;
+	if (IsA(node, Var) && ((Var *) node)->varno == OUTER_VAR)
+	{
+		for (int i = 0; i < fs->agg->numCols; i++)
+			if (((Var *) node)->varattno == fs->agg->grpColIdx[i])
+				return (Node *) makeVarFromTargetEntry(OUTER_VAR,
+													   list_nth_node(TargetEntry, fs->partial, i));
+		fs->failed = true;
+		return node;
+	}
+	if (IsA(node, Aggref))
+	{
+		int			n = 0;
+
+		foreach_node(Aggref, aggref, fs->aggrefs)
+		{
+			TargetEntry *state;
+			Aggref	   *final;
+
+			if (!equal(aggref, node))
+			{
+				n++;
+				continue;
+			}
+			state = list_nth_node(TargetEntry, fs->partial, fs->agg->numCols + n);
+			final = makeNode(Aggref);
+			memcpy(final, aggref, sizeof(Aggref));
+			final->args = NIL;
+			final->aggfilter = NULL;
+			final = copyObject(final);
+			final->args = list_make1(makeTargetEntry((Expr *) makeVarFromTargetEntry(OUTER_VAR, state),
+													 1, NULL, false));
+			final->aggsplit = AGGSPLIT_FINAL_DESERIAL;
+			return (Node *) final;
+		}
+		fs->failed = true;
+		return node;
+	}
+	return expression_tree_mutator(node, final_mutator, fs);
+}
+
+/*
+ * NOT IN CLOUDBERRY.  On one node, an aggregate ORCA planned in one stage
+ * (AGGSPLIT_SIMPLE), lower, which agg is -- or which a vector engine's
+ * node, lower, stands for -- over a subtree a Gather's participants split,
+ * done in two, as PostgreSQL's planner does it (make_partial_grouping_target(),
+ * mark_partial_aggref()): a partial stage in each participant, below the
+ * Gather, of the groups' keys and each aggregate's state, serialized; and
+ * above it the final stage, which combines the participants' states of a
+ * group and finishes them, its own target list and qual over them.  A
+ * plain or hashed aggregate only, the Gather's rows being in no order.  Each
+ * stage is offered to the vector engine, whose node lower may have been.
+ */
+static Plan *
+two_stage(OrcaParallel *op, Plan *lower, Agg *agg)
+{
+	Plan	   *below = lower->lefttree;
+	Share		share;
+	FinalStage	fs;
+	Agg		   *partial;
+	Agg		   *final;
+	Plan	   *gathered;
+	int			resno = 0;
+
+	if (agg->aggsplit != AGGSPLIT_SIMPLE ||
+		(agg->aggstrategy != AGG_PLAIN && agg->aggstrategy != AGG_HASHED) ||
+		agg->groupingSets != NIL || agg->chain != NIL || below == NULL ||
+		!node_safe(op, &agg->plan))
+		return NULL;
+
+	memset(&fs, 0, sizeof(fs));
+	fs.agg = agg;
+	(void) collect_aggrefs((Node *) agg->plan.targetlist, &fs.aggrefs);
+	(void) collect_aggrefs((Node *) agg->plan.qual, &fs.aggrefs);
+	foreach_node(Aggref, aggref, fs.aggrefs)
+		if (!OidIsValid(aggref->aggtranstype) || !combinable(aggref))
+			return NULL;
+
+	/* the partial stage's columns: the keys, then each aggregate's state */
+	for (int i = 0; i < agg->numCols; i++)
+	{
+		TargetEntry *key = get_tle_by_resno(below->targetlist, agg->grpColIdx[i]);
+
+		if (key == NULL)
+			return NULL;
+		fs.partial = lappend(fs.partial,
+							 makeTargetEntry((Expr *) makeVarFromTargetEntry(OUTER_VAR, key),
+											 ++resno, NULL, false));
+	}
+	foreach_node(Aggref, aggref, fs.aggrefs)
+	{
+		Aggref	   *state = copyObject(aggref);
+
+		state->aggsplit = AGGSPLIT_INITIAL_SERIAL;
+		state->aggtype = aggref->aggtranstype == INTERNALOID ? BYTEAOID :
+			aggref->aggtranstype;
+		fs.partial = lappend(fs.partial, makeTargetEntry((Expr *) state, ++resno, NULL, false));
+	}
+
+	final = makeNode(Agg);
+	final->plan.targetlist = (List *) final_mutator((Node *) agg->plan.targetlist, &fs);
+	final->plan.qual = (List *) final_mutator((Node *) agg->plan.qual, &fs);
+	if (fs.failed)
+		return NULL;
+
+	/* each participant's groups, which the final stage reads */
+	if (!splits(op, below, &share) ||
+		!pays(op, &share,
+			  split_cpu(below) + below->plan_rows * cpu_operator_cost *
+			  (list_length(fs.aggrefs) + agg->numCols),
+			  agg->plan.plan_rows * (share.workers + 1)))
+		return NULL;
+	mark_split(below, &share);
+
+	partial = makeNode(Agg);
+	partial->plan.targetlist = fs.partial;
+	partial->plan.startup_cost = agg->plan.startup_cost;
+	partial->plan.total_cost = agg->plan.total_cost;
+	partial->plan.plan_rows = clamp_row_est(Min(agg->plan.plan_rows, below->plan_rows));
+	partial->plan.plan_width = agg->plan.plan_width;
+	partial->plan.plan_node_id = op->next_node_id++;
+	partial->plan.parallel_safe = true;
+	partial->plan.extParam = bms_copy(lower->extParam);
+	partial->plan.allParam = bms_copy(lower->allParam);
+	partial->plan.lefttree = below;
+	partial->aggstrategy = agg->aggstrategy;
+	partial->aggsplit = AGGSPLIT_INITIAL_SERIAL;
+	partial->numCols = agg->numCols;
+	partial->grpColIdx = agg->grpColIdx;
+	partial->grpOperators = agg->grpOperators;
+	partial->grpCollations = agg->grpCollations;
+	partial->numGroups = agg->numGroups;
+	partial->transitionSpace = agg->transitionSpace;
+	partial->aggParams = bms_copy(agg->aggParams);
+
+	final->plan.startup_cost = agg->plan.startup_cost;
+	final->plan.total_cost = agg->plan.total_cost;
+	final->plan.plan_rows = agg->plan.plan_rows;
+	final->plan.plan_width = agg->plan.plan_width;
+	final->plan.plan_node_id = lower->plan_node_id;
+	final->plan.extParam = bms_copy(lower->extParam);
+	final->plan.allParam = bms_copy(lower->allParam);
+	final->aggstrategy = agg->aggstrategy;
+	final->aggsplit = AGGSPLIT_FINAL_DESERIAL;
+	final->numCols = agg->numCols;
+	final->grpColIdx = palloc_array(AttrNumber, Max(agg->numCols, 1));
+	for (int i = 0; i < agg->numCols; i++)
+		final->grpColIdx[i] = i + 1;
+	final->grpOperators = agg->grpOperators;
+	final->grpCollations = agg->grpCollations;
+	final->numGroups = agg->numGroups;
+	final->transitionSpace = agg->transitionSpace;
+
+	gathered = gp_orca_vector_offer(&partial->plan, op->stmt->rtable);
+	gathered->parallel_safe = true;
+	final->plan.lefttree = make_gather(op, gathered, share.workers);
+	return gp_orca_vector_offer(&final->plan, op->stmt->rtable);
+}
+
+static Plan *fragment_walk(OrcaParallel *op, Plan *plan);
+static Plan *node_walk(OrcaParallel *op, Plan *plan);
+
+/*
+ * An aggregate's stages over a subtree a Gather's participants split: in
+ * three, of ORCA's first stage on a segment (three_stage()), and on one
+ * node in two, of an aggregate ORCA planned in one (two_stage()); NULL for
+ * neither.
+ */
+static Plan *
+split_stages(OrcaParallel *op, Plan *lower, Agg *agg)
+{
+	Plan	   *upper = three_stage(op, lower, agg);
+
+	if (upper == NULL && op->one_node)
+		upper = two_stage(op, lower, agg);
+	return upper;
+}
+
+/*
+ * NOT IN CLOUDBERRY.  On one node, does a NestLoop's outer side return one
+ * row at most, so that its inner side runs once: a plain aggregate, of no
+ * grouping sets, or a vector engine's, under projections.
+ */
+static bool
+one_row(Plan *plan)
+{
+	GpOrcaVecNode vn;
+
+	for (; plan != NULL; plan = plan->lefttree)
+	{
+		check_stack_depth();
+		if (IsA(plan, Agg))
+			return ((Agg *) plan)->aggstrategy == AGG_PLAIN &&
+				((Agg *) plan)->groupingSets == NIL;
+		if (IsA(plan, CustomScan))
+		{
+			switch (vec_kind(plan, &vn))
+			{
+				case GP_ORCA_VEC_AGG:
+					return vn.agg->aggstrategy == AGG_PLAIN &&
+						vn.agg->groupingSets == NIL;
+				case GP_ORCA_VEC_RESULT:
+					continue;
+				default:
+					return false;
+			}
+		}
+		if (!IsA(plan, Result) && !IsA(plan, Material))
+			return false;
+	}
+	return false;
+}
+
+/*
+ * NOT IN CLOUDBERRY.  On one node, below a Limit, which may read a part of
+ * what is below it: through the nodes that pass their rows on as they read
+ * them, down to the first that reads all its input before it returns a row
+ * -- a Sort, a plain or hashed Agg, a hashed SetOp, a hash join's inner
+ * side -- whose input the fragment's walk takes, as coordinator_walk() goes
+ * down to a Gather Motion read whole.
+ */
+static Plan *
+below_limit(OrcaParallel *op, Plan *plan)
+{
+	GpOrcaVecNode vn;
+
+	if (plan == NULL)
+		return NULL;
+	check_stack_depth();
+	switch (nodeTag(plan))
+	{
+		case T_Sort:
+			return fragment_walk(op, plan);
+		case T_Agg:
+			if (((Agg *) plan)->aggstrategy == AGG_PLAIN ||
+				((Agg *) plan)->aggstrategy == AGG_HASHED)
+				return fragment_walk(op, plan);
+			break;
+		case T_SetOp:
+			if (((SetOp *) plan)->strategy == SETOP_HASHED)
+				return fragment_walk(op, plan);
+			break;
+		case T_HashJoin:
+			plan->righttree = fragment_walk(op, plan->righttree);
+			break;
+		case T_MergeJoin:
+			plan->righttree = below_limit(op, plan->righttree);
+			break;
+		case T_Result:
+		case T_Limit:
+		case T_Unique:
+		case T_Group:
+		case T_WindowAgg:
+		case T_NestLoop:
+			break;
+		case T_SubqueryScan:
+			((SubqueryScan *) plan)->subplan =
+				below_limit(op, ((SubqueryScan *) plan)->subplan);
+			return plan;
+		case T_CustomScan:
+			/* a vector engine's, as the node it stands for */
+			switch (vec_kind(plan, &vn))
+			{
+				case GP_ORCA_VEC_SORT:
+					return fragment_walk(op, plan);
+				case GP_ORCA_VEC_AGG:
+					if (vn.agg->aggstrategy == AGG_PLAIN ||
+						vn.agg->aggstrategy == AGG_HASHED)
+						return fragment_walk(op, plan);
+					break;
+				case GP_ORCA_VEC_HASHJOIN:
+					plan->righttree = fragment_walk(op, plan->righttree);
+					break;
+				case GP_ORCA_VEC_RESULT:
+					break;
+				default:
+					return plan;
+			}
+			break;
+		default:
+			return plan;
+	}
+	plan->lefttree = below_limit(op, plan->lefttree);
+	return plan;
+}
+
+/*
+ * NOT IN CLOUDBERRY.  On one node, the subplans of a node's initplans --
+ * a value's, or a CTE's, which every CteScan of it reads -- which run once
+ * as the node does, and so are walked as the fragment is; and the node's
+ * own walk, with the initplans whose values the backend can compute for a
+ * Gather below, all but a CTE's, among those is_parallel_safe() takes for
+ * parallel-safe and make_gather() passes on.
+ */
+static Plan *
+initplans_walk(OrcaParallel *op, Plan *plan)
+{
+	List	   *outer = op->root->init_plans;
+	List	   *values = NIL;
+
+	foreach_node(SubPlan, init, plan->initPlan)
+	{
+		ListCell   *cell;
+
+		if (init->plan_id < 1 || init->plan_id > list_length(op->stmt->subplans))
+			continue;
+		cell = list_nth_cell(op->stmt->subplans, init->plan_id - 1);
+		lfirst(cell) = fragment_walk(op, (Plan *) lfirst(cell));
+		if (init->subLinkType != CTE_SUBLINK)
+			values = lappend(values, init);
+	}
+	op->root->init_plans = list_concat_copy(outer, values);
+	plan = node_walk(op, plan);
+	op->root->init_plans = outer;
+	return plan;
+}
+
 /*
  * The fragment a writer runs: its scans that a Gather pays over, through
  * the nodes that run once each time it runs -- not a NestLoop's inner side,
  * which runs again for each outer row, not below a Limit, which may read a
  * part of what is below, not into a Motion, whose fragment another process
- * runs, nor any other CustomScan.
+ * runs, nor any other CustomScan.  On one node, the whole plan, a Limit's
+ * input and a NestLoop's inner side as far as they run once too.
  */
 static Plan *
 fragment_walk(OrcaParallel *op, Plan *plan)
 {
-	Share		share;
-
 	if (plan == NULL)
 		return NULL;
+	if (op->one_node && plan->initPlan != NIL)
+		return initplans_walk(op, plan);
+	return node_walk(op, plan);
+}
+
+/* A node of the fragment, and what is below it. */
+static Plan *
+node_walk(OrcaParallel *op, Plan *plan)
+{
+	Share		share;
+
 	check_stack_depth();
 
 	/* the largest subtree the participants can split, if a Gather pays */
@@ -700,7 +1184,7 @@ fragment_walk(OrcaParallel *op, Plan *plan)
 	{
 		case T_Agg:
 			{
-				Plan	   *upper = three_stage(op, plan, (Agg *) plan);
+				Plan	   *upper = split_stages(op, plan, (Agg *) plan);
 
 				if (upper != NULL)
 					return upper;
@@ -716,16 +1200,31 @@ fragment_walk(OrcaParallel *op, Plan *plan)
 				{
 					case GP_ORCA_VEC_AGG:
 						{
-							Plan	   *upper = three_stage(op, plan, vn.agg);
+							Plan	   *upper = split_stages(op, plan, vn.agg);
 
 							if (upper != NULL)
 								return upper;
 							plan->lefttree = fragment_walk(op, plan->lefttree);
 							break;
 						}
+					case GP_ORCA_VEC_SORT:
+						{
+							GpOrcaVecNode child;
+
+							/*
+							 * not between the sort and a scan right below
+							 * it, whose relation the engine's sort may fetch
+							 * the columns past its keys from, by TID, and
+							 * finds through it (vexec's late columns)
+							 */
+							if (plan->lefttree != NULL &&
+								vec_kind(plan->lefttree, &child) == GP_ORCA_VEC_SEQSCAN)
+								break;
+							plan->lefttree = fragment_walk(op, plan->lefttree);
+							break;
+						}
 					case GP_ORCA_VEC_HASHJOIN:
 					case GP_ORCA_VEC_RESULT:
-					case GP_ORCA_VEC_SORT:
 						plan->lefttree = fragment_walk(op, plan->lefttree);
 						plan->righttree = fragment_walk(op, plan->righttree);
 						break;
@@ -749,7 +1248,31 @@ fragment_walk(OrcaParallel *op, Plan *plan)
 			plan->righttree = fragment_walk(op, plan->righttree);
 			break;
 		case T_NestLoop:
-			plan->lefttree = fragment_walk(op, plan->lefttree);
+			{
+				bool		once = op->one_node && one_row(plan->lefttree);
+
+				plan->lefttree = fragment_walk(op, plan->lefttree);
+
+				/*
+				 * On one node, an inner side that runs once, for the one row
+				 * of the outer side -- ORCA's plan of a comparison with a
+				 * scalar subquery's aggregate -- or that has no parameters of
+				 * the loop's and is read through a Material, which reads
+				 * what is below it once and keeps it for every outer row
+				 * after the first (EXEC_FLAG_REWIND, ExecReScanMaterial())
+				 */
+				if (once)
+					plan->righttree = fragment_walk(op, plan->righttree);
+				else if (op->one_node && ((NestLoop *) plan)->nestParams == NIL &&
+						 plan->righttree != NULL && IsA(plan->righttree, Material) &&
+						 plan->righttree->initPlan == NIL)
+					plan->righttree->lefttree =
+						fragment_walk(op, plan->righttree->lefttree);
+				break;
+			}
+		case T_Limit:
+			if (op->one_node)
+				plan->lefttree = below_limit(op, plan->lefttree);
 			break;
 		case T_Append:
 			{
@@ -855,16 +1378,136 @@ coordinator_walk(OrcaParallel *op, Plan *plan, bool whole)
 	coordinator_walk(op, plan->righttree, whole);
 }
 
-void
-GpOrcaParallelize(PlannedStmt *stmt, Query *query, int cursorOptions)
+/*
+ * Does the session ask for ORCA's parallel plans: gp.enable_parallel --
+ * gp_core's, or on one node gp_orca's own -- and PostgreSQL's
+ * max_parallel_workers_per_gather above 0, as gp_core's GpParallelEnabled()
+ * answers.
+ */
+static bool
+parallel_enabled(void)
 {
 	const char *enabled = GetConfigOption("gp.enable_parallel", true, false);
 	bool		on = false;
+
+	return enabled != NULL && parse_bool(enabled, &on) && on &&
+		max_parallel_workers_per_gather > 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* On one node, a plan made with Gathers, run without them                   */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * NOT IN CLOUDBERRY.  On a PlannedStmt, in its extension_state: the pass
+ * put Gathers into the plan on one node.
+ */
+#define GP_ORCA_GATHERS_MARK	"gp_orca_one_node_gathers"
+
+static ExecutorStart_hook_type prev_executor_start = NULL;
+
+static bool
+gathers_marked(PlannedStmt *stmt)
+{
+	foreach_node(DefElem, def, stmt->extension_state)
+		if (strcmp(def->defname, GP_ORCA_GATHERS_MARK) == 0)
+			return true;
+	return false;
+}
+
+/*
+ * A plan's Gathers taken out: each replaced by what is below it, whose
+ * columns a Gather passes on as they are (make_gather()), run whole by the
+ * one process -- the scan that drove it no longer parallel-aware, and an
+ * aggregate's final stage combining the one partial state below it -- as
+ * gp_core's strip_gathers() runs a segment's fragment (gp_parallel.c).
+ */
+static Plan *
+strip_gathers(Plan *plan)
+{
+	if (plan == NULL)
+		return NULL;
+	check_stack_depth();
+	if (IsA(plan, Gather))
+	{
+		for (Plan *below = plan->lefttree; below != NULL; below = below->lefttree)
+			below->parallel_aware = false;
+		return strip_gathers(plan->lefttree);
+	}
+	plan->lefttree = strip_gathers(plan->lefttree);
+	plan->righttree = strip_gathers(plan->righttree);
+	switch (nodeTag(plan))
+	{
+		case T_Append:
+			{
+				ListCell   *lc;
+
+				foreach(lc, ((Append *) plan)->appendplans)
+					lfirst(lc) = strip_gathers((Plan *) lfirst(lc));
+				break;
+			}
+		case T_SubqueryScan:
+			((SubqueryScan *) plan)->subplan =
+				strip_gathers(((SubqueryScan *) plan)->subplan);
+			break;
+		default:
+			break;
+	}
+	return plan;
+}
+
+/*
+ * NOT IN CLOUDBERRY.  A plan the pass gave Gathers on one node, starting
+ * where the session asks for no parallel plan -- a prepared statement's or
+ * a function's cached plan, gp.enable_parallel turned off since -- runs a
+ * copy of it without them and outside parallel mode, as a segment's writer
+ * takes a fragment's Gathers out (gp_parallel.c): the setting is the one
+ * that turns ORCA's parallel plans off on a cluster.  The cached plan stays
+ * as it was made, for when the setting is on again; a parallel worker runs
+ * the part it is sent.
+ */
+static void
+one_node_executor_start(QueryDesc *queryDesc, int eflags)
+{
+	PlannedStmt *stmt = queryDesc->plannedstmt;
+
+	if (stmt != NULL && stmt->parallelModeNeeded && !IsParallelWorker() &&
+		gathers_marked(stmt) && !parallel_enabled())
+	{
+		PlannedStmt *copy = palloc_object(PlannedStmt);
+		ListCell   *lc;
+
+		memcpy(copy, stmt, sizeof(PlannedStmt));
+		copy->planTree = strip_gathers(copyObject(stmt->planTree));
+		copy->subplans = NIL;
+		foreach(lc, stmt->subplans)
+			copy->subplans = lappend(copy->subplans,
+									 strip_gathers(copyObject((Plan *) lfirst(lc))));
+		copy->parallelModeNeeded = false;
+		queryDesc->plannedstmt = copy;
+	}
+
+	if (prev_executor_start)
+		prev_executor_start(queryDesc, eflags);
+	else
+		standard_ExecutorStart(queryDesc, eflags);
+}
+
+void
+GpOrcaParallelInit(void)
+{
+	prev_executor_start = ExecutorStart_hook;
+	ExecutorStart_hook = one_node_executor_start;
+}
+
+void
+GpOrcaParallelize(PlannedStmt *stmt, Query *query, int cursorOptions)
+{
 	OrcaParallel op;
 
-	if (enabled == NULL || !parse_bool(enabled, &on) || !on ||
-		max_parallel_workers_per_gather <= 0 || IS_SINGLENODE() ||
+	if (!parallel_enabled() ||
 		!(cursorOptions & CURSOR_OPT_PARALLEL_OK) || !IsUnderPostmaster ||
+		IsParallelWorker() ||
 		stmt->commandType != CMD_SELECT || stmt->hasModifyingCTE ||
 		stmt->rowMarks != NIL || max_parallel_hazard(query) == PROPARALLEL_UNSAFE)
 		return;
@@ -884,6 +1527,36 @@ GpOrcaParallelize(PlannedStmt *stmt, Query *query, int cursorOptions)
 
 		op.next_node_id = Max(op.next_node_id, below);
 	}
+	op.one_node = IS_SINGLENODE();
+	op.made = false;
 
-	coordinator_walk(&op, stmt->planTree, true);
+	if (!op.one_node)
+	{
+		coordinator_walk(&op, stmt->planTree, true);
+		return;
+	}
+
+	/*
+	 * NOT IN CLOUDBERRY.  On one node, the whole plan, which the backend runs
+	 * in parallel mode where it has a Gather, as the planner's plan; a worker
+	 * opens each relation with its range table's lock mode, and asserts that
+	 * it holds that lock (execUtils.c), so a relation ORCA left without one
+	 * is read in AccessShareLock, which the backend takes, as gp_parallel.c
+	 * has a segment's writer take it.
+	 */
+	stmt->planTree = fragment_walk(&op, stmt->planTree);
+	if (op.made)
+	{
+		foreach_node(RangeTblEntry, rte, stmt->rtable)
+			if (rte->rtekind == RTE_RELATION && rte->rellockmode == NoLock)
+			{
+				rte->rellockmode = AccessShareLock;
+				LockRelationOid(rte->relid, AccessShareLock);
+			}
+		stmt->parallelModeNeeded = true;
+		stmt->extension_state =
+			lappend(stmt->extension_state,
+					makeDefElem(pstrdup(GP_ORCA_GATHERS_MARK),
+								(Node *) makeBoolean(true), -1));
+	}
 }

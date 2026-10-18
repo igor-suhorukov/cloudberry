@@ -246,3 +246,16 @@ gp_orca_vector_plan(Plan *plan, List *subplans, List *rtable, List *windows)
 	walk_list(subplans, rtable, windows);
 	return walk(plan, rtable, windows);
 }
+
+/*
+ * A node a pass over the finished plan made, over children already offered
+ * -- an aggregate's two stages on one node (parallel.c) -- offered as the
+ * translator's nodes are.
+ */
+Plan *
+gp_orca_vector_offer(Plan *plan, List *rtable)
+{
+	if (engine_state == NULL || !GP_ORCA_VEC_HAS(engine, build_node))
+		return plan;
+	return offer(plan, rtable);
+}

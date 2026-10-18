@@ -45,7 +45,9 @@
  *	  a type's distribution class, and a family's hash function, from the
  *	  catalog, as gp_core finds them (gp_policy.c, gp_hash.c);
  *	  the statement as PostgreSQL's planner has it: gp_core's rewrites of it
- *	  are a cluster's, and of functions its extension makes (gp_segment.c).
+ *	  are a cluster's, and of functions its extension makes (gp_segment.c);
+ *	  and gp_core's gp.enable_parallel, off, which ORCA's Gathers on this
+ *	  node ask (orca/parallel.c), defined here.
  *
  * What only a cluster asks -- a Motion, a split update, the explicit write,
  * a parallel retrieve cursor's endpoints -- raises: it is not reached on one
@@ -76,6 +78,7 @@
 #include "parser/parse_coerce.h"
 #include "utils/builtins.h"
 #include "utils/catcache.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
@@ -101,6 +104,9 @@
 #endif
 
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
+
+/* gp_core's gp.enable_parallel, Cloudberry's enable_parallel */
+static bool enable_parallel = false;
 
 /* ------------------------------------------------------------------------- */
 /* gp_core, absent                                                            */
@@ -142,6 +148,13 @@ GpOrcaSingleNodeInit(void)
 		refuse_beside_gp_core();
 	prev_shmem_request_hook = shmem_request_hook;
 	shmem_request_hook = single_node_shmem_request;
+
+	DefineCustomBoolVariable("gp.enable_parallel",
+							 "allow to use of parallel query facilities or not.",
+							 "ORCA's plans on this node may have PostgreSQL's Gathers where PostgreSQL's settings say they pay; PostgreSQL's planner's plans follow its own settings.  Cloudberry calls this enable_parallel.",
+							 &enable_parallel,
+							 false, PGC_USERSET, GUC_EXPLAIN,
+							 NULL, NULL, NULL);
 }
 
 /* ------------------------------------------------------------------------- */

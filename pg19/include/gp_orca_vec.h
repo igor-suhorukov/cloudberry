@@ -38,7 +38,10 @@
  *						passes over the finished plan (lockrows.c, merge.c,
  *						parallel.c), the dependency walk -- sees the final
  *						tree, and a node replaced keeps its plan node id,
- *						its costs and its parameters
+ *						its costs and its parameters.  On one node, also
+ *						the two stages parallel.c makes of an aggregate
+ *						ORCA planned in one, around the Gather between
+ *						them, each over children offered already
  *	end_statement		once ORCA's plan is made: the engine's check of it,
  *						and what it records in PlannedStmt.extension_state
  *
