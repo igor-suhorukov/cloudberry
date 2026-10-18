@@ -259,3 +259,26 @@ gp_orca_vector_offer(Plan *plan, List *rtable)
 		return plan;
 	return offer(plan, rtable);
 }
+
+/*
+ * Whether the engine deals the partial groups of an aggregate ORCA planned
+ * in one stage among a Gather's participants, so that its final stage runs
+ * in each (gp_orca_vec.h, repartitions, from its minor version 5).
+ */
+bool
+gp_orca_vector_repartitions(Agg *agg, bool at_top)
+{
+	return engine_state != NULL && GP_ORCA_VEC_HAS(engine, repartitions) &&
+		GP_ORCA_VEC_HAS(engine, build_repartition) &&
+		engine->repartitions(engine_state, agg, at_top);
+}
+
+/* The engine's node that deals them, over the partial stage (build_repartition). */
+Plan *
+gp_orca_vector_repartition(Plan *partial, int nkeys, const AttrNumber *keycols,
+						   const Oid *eqops, const Oid *collations)
+{
+	if (engine_state == NULL || !GP_ORCA_VEC_HAS(engine, build_repartition))
+		return NULL;
+	return engine->build_repartition(engine_state, partial, nkeys, keycols, eqops, collations);
+}

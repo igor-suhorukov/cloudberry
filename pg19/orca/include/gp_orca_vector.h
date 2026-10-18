@@ -76,6 +76,9 @@ extern Plan *gp_orca_vector_plan(Plan *plan, List *subplans, List *rtable,
  * the engine's node in its place, or the node.
  */
 extern Plan *gp_orca_vector_offer(Plan *plan, List *rtable);
+extern bool gp_orca_vector_repartitions(Agg *agg, bool at_top);
+extern Plan *gp_orca_vector_repartition(Plan *partial, int nkeys, const AttrNumber *keycols,
+										const Oid *eqops, const Oid *collations);
 
 #ifdef __cplusplus
 }

@@ -109,6 +109,10 @@
  *   whose inner side each reads whole, aggregates and sorts on that side
  *   too (whole_in_each());
  *
+ *   a grouping in three stages within a split subtree, its final stage in
+ *   each participant over a vector engine's node that deals the partial
+ *   groups among them by their keys (repartitions(), repartition());
+ *
  *   the subplans of initplans and of CTEs, which run once, as the nodes
  *   they belong to do; an initplan's value read below a Gather is computed
  *   by the backend and passed to its workers (Gather.initParam), as the
@@ -182,6 +186,7 @@ typedef struct OrcaParallel
 	int			next_node_id;	/* the plan node id of the next Gather */
 	bool		one_node;		/* the whole plan the backend's */
 	bool		made;			/* a Gather was made */
+	int			under_join;		/* splits() is below a join's side */
 } OrcaParallel;
 
 static bool
@@ -504,6 +509,52 @@ partial_stage(OrcaParallel *op, Agg *agg)
 static bool shares_table(OrcaParallel *op, HashJoin *hj, Share *inner);
 static bool vec_shares_table(OrcaParallel *op, Plan *join, GpOrcaVecNode *vn,
 							 Share *inner);
+static bool stages_ok(OrcaParallel *op, Plan *lower, Agg *agg);
+static bool make_stages(OrcaParallel *op, Plan *lower, Agg *agg, Agg **partialp,
+						Agg **finalp);
+
+/*
+ * NOT IN CLOUDBERRY.  On one node, may an aggregate ORCA planned in one
+ * stage, lower, which agg is or which a vector engine's node stands for, be
+ * split within a subtree the participants split, in three stages below the
+ * Gather: its partial stage in each participant, the vector engine's node
+ * that deals the partial groups among them by their keys' hash, and its
+ * final stage in each, which finalizes the groups it is dealt
+ * (gp_orca_vec.h's repartitions, from its minor version 5; vexec's
+ * VecRepartition) -- a hashed aggregate the engine takes, of two stages
+ * make_stages() can make; on a join's side or not, where a Gather may go
+ * below it instead, which the engine weighs (side_splits()).  Its final groups come out of the participants
+ * together, each once, as a split scan's rows do: so TPC-H q18's grouping
+ * of lineitem with HAVING splits on a hash join's inner side, under a table
+ * the participants share, where computed whole by each it repeated the
+ * plan's larger part (whole_pays()), and a grouping of many groups below a
+ * Gather passes it its final groups alone.
+ */
+static bool
+repartitions(OrcaParallel *op, Plan *lower, Agg *agg)
+{
+	return op->one_node && agg->aggstrategy == AGG_HASHED && agg->numCols > 0 &&
+		stages_ok(op, lower, agg) && gp_orca_vector_repartitions(agg, op->under_join == 0);
+}
+
+static bool splits(OrcaParallel *op, Plan *plan, Share *share);
+
+/*
+ * Can a join's side be split (splits()): a grouping in it is no Gather's
+ * top, which the engine weighs repartitioning by (repartitions(), at_top)
+ * -- dealt among the participants there, it lets the join split with it,
+ * where otherwise a Gather can go below it alone.
+ */
+static bool
+side_splits(OrcaParallel *op, Plan *plan, Share *share)
+{
+	bool		result;
+
+	op->under_join++;
+	result = splits(op, plan, share);
+	op->under_join--;
+	return result;
+}
 
 /* Does a subtree hold an aggregate or a sort, a vector engine's too? */
 static bool
@@ -569,10 +620,11 @@ whole_pays(Plan *outer, Plan *inner)
  * semi or anti join, where an outer row meets every inner row in the one
  * participant that reads it; not a right or full join, whose unmatched
  * inner rows every participant would return -- and projections; on one
- * node, partial stages of aggregates too (partial_stage()), and hash joins
- * whose inner sides the participants split as well and hash into one table
- * they share (shares_table()), of any of those join types, a right and a
- * full one among them.
+ * node, partial stages of aggregates too (partial_stage()), aggregates in
+ * three stages (repartitions()), and hash joins whose inner sides the
+ * participants split as well and hash into one table they share
+ * (shares_table()), of any of those join types, a right and a full one
+ * among them.
  */
 static bool
 splits(OrcaParallel *op, Plan *plan, Share *share)
@@ -587,7 +639,7 @@ splits(OrcaParallel *op, Plan *plan, Share *share)
 		case T_SeqScan:
 			return scan_share(op, (Scan *) plan, share);
 		case T_Agg:
-			return partial_stage(op, (Agg *) plan) &&
+			return (partial_stage(op, (Agg *) plan) || repartitions(op, plan, (Agg *) plan)) &&
 				splits(op, plan->lefttree, share);
 		case T_CustomScan:
 			/* a vector engine's: its scan, hash join or projection */
@@ -596,7 +648,7 @@ splits(OrcaParallel *op, Plan *plan, Share *share)
 				case GP_ORCA_VEC_SEQSCAN:
 					return scan_share(op, (Scan *) plan, share);
 				case GP_ORCA_VEC_AGG:
-					return partial_stage(op, vn.agg) &&
+					return (partial_stage(op, vn.agg) || repartitions(op, plan, vn.agg)) &&
 						splits(op, plan->lefttree, share);
 				case GP_ORCA_VEC_HASHJOIN:
 					{
@@ -608,14 +660,14 @@ splits(OrcaParallel *op, Plan *plan, Share *share)
 							return false;
 						if (vec_shares_table(op, plan, &vn, &inner))
 						{
-							if (!splits(op, plan->lefttree, share))
+							if (!side_splits(op, plan->lefttree, share))
 								return false;
 							share_widen(share, &inner);
 							return true;
 						}
 						return whole_in_each(op, plan->righttree) &&
 							whole_pays(plan->lefttree, plan->righttree) &&
-							splits(op, plan->lefttree, share);
+							side_splits(op, plan->lefttree, share);
 					}
 				case GP_ORCA_VEC_RESULT:
 					return plan->lefttree != NULL &&
@@ -636,7 +688,7 @@ splits(OrcaParallel *op, Plan *plan, Share *share)
 					return false;
 				if (shares_table(op, hj, &inner))
 				{
-					if (!splits(op, plan->lefttree, share))
+					if (!side_splits(op, plan->lefttree, share))
 						return false;
 					share_widen(share, &inner);
 					return true;
@@ -646,7 +698,7 @@ splits(OrcaParallel *op, Plan *plan, Share *share)
 					return false;
 				return whole_in_each(op, plan->righttree) &&
 					whole_pays(plan->lefttree, plan->righttree) &&
-					splits(op, plan->lefttree, share);
+					side_splits(op, plan->lefttree, share);
 			}
 		case T_Result:
 			return plan->lefttree != NULL &&
@@ -662,8 +714,10 @@ static double table_cpu(OrcaParallel *op, Plan *inner_top, int nkeys, Share *inn
 /*
  * The CPU a split subtree spends above its driver on each row, which the
  * participants divide as they divide the scan's: a hash join's probes, and
- * a partial stage's transitions, an operator's cost a column; and all that
- * a shared table's inner side spends, its build too (table_cpu()).
+ * a partial stage's transitions, and a repartitioned aggregate's, an
+ * operator's cost a column -- the repartition's own price, which serial
+ * work does not pay, the engine's to weigh (repartitions()); and all that a
+ * shared table's inner side spends, its build too (table_cpu()).
  */
 static double
 split_cpu(OrcaParallel *op, Plan *plan)
@@ -772,7 +826,7 @@ shares_table(OrcaParallel *op, HashJoin *hj, Share *inner)
 		 jointype != JOIN_ANTI && jointype != JOIN_RIGHT && jointype != JOIN_FULL) ||
 		!node_safe(op, hash) ||
 		!is_parallel_safe(op->root, (Node *) ((Hash *) hash)->hashkeys) ||
-		!splits(op, hash->lefttree, inner))
+		!side_splits(op, hash->lefttree, inner))
 		return false;
 	return table_cpu(op, hash->lefttree, list_length(((Hash *) hash)->hashkeys), inner) *
 		(1.0 - 1.0 / inner->divisor) > 1000 * cpu_tuple_cost;
@@ -798,10 +852,63 @@ vec_shares_table(OrcaParallel *op, Plan *join, GpOrcaVecNode *vn, Share *inner)
 		return false;
 	engine = gp_orca_vec_find();
 	if (engine == NULL || !GP_ORCA_VEC_HAS(engine, shares_table) ||
-		!engine->shares_table(join) || !splits(op, join->righttree, inner))
+		!engine->shares_table(join) || !side_splits(op, join->righttree, inner))
 		return false;
 	return table_cpu(op, join->righttree, vn->nhashclauses, inner) *
 		(1.0 - 1.0 / inner->divisor) > 1000 * cpu_tuple_cost;
+}
+
+static Plan *mark_split(OrcaParallel *op, Plan *top, Share *share);
+
+/*
+ * NOT IN CLOUDBERRY.  An aggregate repartitions() split, lower, which agg is
+ * or which a vector engine's node stands for, in its three stages over what
+ * is below it, split as well: the partial stage, offered to the engine; the
+ * engine's node that deals its groups among the participants by their keys,
+ * the partial stage's first columns (build_repartition); the final stage,
+ * offered, each participant's rows its share of the groups.
+ */
+static Plan *
+repartition(OrcaParallel *op, Plan *lower, Agg *agg, Share *share)
+{
+	Agg		   *partial;
+	Agg		   *final;
+	Plan	   *below;
+	Plan	   *offered;
+	Plan	   *dealt;
+	Plan	   *built;
+	AttrNumber *keycols = palloc_array(AttrNumber, Max(agg->numCols, 1));
+
+	/*
+	 * the stages offered by the estimates of the whole, as the aggregate was
+	 * -- an engine may take a node by its rows (vexec.min_rows) -- and then
+	 * each participant's rows given them, what is below split
+	 */
+	if (!make_stages(op, lower, agg, &partial, &final))
+		elog(ERROR, "gp_orca: an aggregate split in three stages that cannot be made in two");
+	below = lower->lefttree;
+	offered = gp_orca_vector_offer(&partial->plan, op->stmt->rtable);
+	for (int i = 0; i < agg->numCols; i++)
+		keycols[i] = i + 1;
+	dealt = gp_orca_vector_repartition(offered, agg->numCols, keycols, agg->grpOperators,
+									   agg->grpCollations);
+	if (dealt == NULL)
+		elog(ERROR, "gp_orca: the vector engine made no node to deal an aggregate's groups");
+	dealt->plan_node_id = op->next_node_id++;
+	dealt->extParam = bms_copy(offered->extParam);
+	dealt->allParam = bms_copy(offered->allParam);
+	final->plan.lefttree = dealt;
+	built = gp_orca_vector_offer(&final->plan, op->stmt->rtable);
+
+	offered->lefttree = mark_split(op, below, share);
+	offered->parallel_safe = true;
+	offered->plan_rows = clamp_row_est(Min(agg->plan.plan_rows, offered->lefttree->plan_rows));
+	dealt->parallel_aware = true;
+	dealt->parallel_safe = true;
+	dealt->plan_rows = offered->plan_rows;
+	built->parallel_safe = true;
+	built->plan_rows = clamp_row_est(agg->plan.plan_rows / share->divisor);
+	return built;
 }
 
 /*
@@ -811,16 +918,29 @@ vec_shares_table(OrcaParallel *op, Plan *join, GpOrcaVecNode *vn, Share *inner)
  * hash join and its Hash parallel-aware, the Hash told the rows of all
  * participants it is sized by (create_hashjoin_plan()'s rows_total), and
  * its inner side split as well; a vector engine's hash join that shares
- * its table parallel-aware, its inner side split.
+ * its table parallel-aware, its inner side split; an aggregate of one
+ * stage in three (repartition()).  The subtree's top, which the last may
+ * have replaced.
  */
-static void
-mark_split(OrcaParallel *op, Plan *plan, Share *share)
+static Plan *
+mark_split(OrcaParallel *op, Plan *top, Share *share)
 {
 	Share		inner;
 	GpOrcaVecNode vn;
+	Plan	  **link = &top;
 
-	for (; plan != NULL; plan = plan->lefttree)
+	for (Plan *plan = top; plan != NULL; link = &plan->lefttree, plan = plan->lefttree)
 	{
+		Agg		   *agg = IsA(plan, Agg) ? (Agg *) plan :
+			IsA(plan, CustomScan) && vec_kind(plan, &vn) == GP_ORCA_VEC_AGG ? vn.agg : NULL;
+
+		check_stack_depth();
+		/* one stage on a split spine: repartitions() took it */
+		if (agg != NULL && agg->aggsplit == AGGSPLIT_SIMPLE)
+		{
+			*link = repartition(op, plan, agg, share);
+			break;
+		}
 		if (IsA(plan, HashJoin) && shares_table(op, (HashJoin *) plan, &inner))
 		{
 			Plan	   *hash = plan->righttree;
@@ -830,13 +950,13 @@ mark_split(OrcaParallel *op, Plan *plan, Share *share)
 			hash->parallel_safe = true;
 			((Hash *) hash)->rows_total = hash->lefttree->plan_rows;
 			hash->plan_rows = clamp_row_est(hash->plan_rows / inner.divisor);
-			mark_split(op, hash->lefttree, &inner);
+			hash->lefttree = mark_split(op, hash->lefttree, &inner);
 		}
 		else if (IsA(plan, CustomScan) && vec_kind(plan, &vn) == GP_ORCA_VEC_HASHJOIN &&
 				 vec_shares_table(op, plan, &vn, &inner))
 		{
 			plan->parallel_aware = true;
-			mark_split(op, plan->righttree, &inner);
+			plan->righttree = mark_split(op, plan->righttree, &inner);
 		}
 		plan->parallel_safe = true;
 		plan->plan_rows = clamp_row_est(plan->plan_rows / share->divisor);
@@ -848,6 +968,7 @@ mark_split(OrcaParallel *op, Plan *plan, Share *share)
 			break;
 		}
 	}
+	return top;
 }
 
 /*
@@ -1051,7 +1172,7 @@ three_stage(OrcaParallel *op, Plan *lower, Agg *agg)
 	upper->plan.plan_width = agg->plan.plan_width;
 	upper->plan.plan_node_id = op->next_node_id++;
 
-	mark_split(op, below, &share);
+	lower->lefttree = mark_split(op, below, &share);
 	lower->parallel_safe = true;
 	upper->plan.lefttree = make_gather(op, lower, share.workers);
 	return &upper->plan;
@@ -1134,49 +1255,78 @@ final_mutator(Node *node, FinalStage *fs)
 }
 
 /*
- * NOT IN CLOUDBERRY.  On one node, an aggregate ORCA planned in one stage
- * (AGGSPLIT_SIMPLE), lower, which agg is -- or which a vector engine's
- * node, lower, stands for -- over a subtree a Gather's participants split,
- * done in two, as PostgreSQL's planner does it (make_partial_grouping_target(),
- * mark_partial_aggref()): a partial stage in each participant, below the
- * Gather, of the groups' keys and each aggregate's state, serialized; and
- * above it the final stage, which combines the participants' states of a
- * group and finishes them, its own target list and qual over them.  A
- * plain or hashed aggregate only, the Gather's rows being in no order.  Each
- * stage is offered to the vector engine, whose node lower may have been.
+ * Can an aggregate ORCA planned in one stage (AGGSPLIT_SIMPLE), lower, which
+ * agg is -- or which a vector engine's node, lower, stands for -- be done
+ * in two over what is below it (make_stages()): a plain or hashed one, its
+ * aggregates' states combinable, every column of its target list and qual
+ * outside its aggregates one of its group's keys.
  */
-static Plan *
-two_stage(OrcaParallel *op, Plan *lower, Agg *agg)
+static bool
+stages_walker(Node *node, Agg *agg)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Aggref))
+		return !OidIsValid(((Aggref *) node)->aggtranstype) || !combinable((Aggref *) node);
+	if (IsA(node, Var) && ((Var *) node)->varno == OUTER_VAR)
+	{
+		for (int i = 0; i < agg->numCols; i++)
+			if (((Var *) node)->varattno == agg->grpColIdx[i])
+				return false;
+		return true;
+	}
+	return expression_tree_walker(node, stages_walker, agg);
+}
+
+static bool
+stages_ok(OrcaParallel *op, Plan *lower, Agg *agg)
 {
 	Plan	   *below = lower->lefttree;
-	Share		share;
-	FinalStage	fs;
-	Agg		   *partial;
-	Agg		   *final;
-	Plan	   *gathered;
-	int			resno = 0;
 
 	if (agg->aggsplit != AGGSPLIT_SIMPLE ||
 		(agg->aggstrategy != AGG_PLAIN && agg->aggstrategy != AGG_HASHED) ||
 		agg->groupingSets != NIL || agg->chain != NIL || below == NULL ||
 		!node_safe(op, &agg->plan))
-		return NULL;
+		return false;
+	for (int i = 0; i < agg->numCols; i++)
+		if (get_tle_by_resno(below->targetlist, agg->grpColIdx[i]) == NULL)
+			return false;
+	return !stages_walker((Node *) agg->plan.targetlist, agg) &&
+		!stages_walker((Node *) agg->plan.qual, agg);
+}
+
+/*
+ * NOT IN CLOUDBERRY.  On one node, an aggregate ORCA planned in one stage,
+ * lower, which agg is or which a vector engine's node stands for, made in
+ * two as PostgreSQL's planner makes them (make_partial_grouping_target(),
+ * mark_partial_aggref()), over lower's input, neither offered yet: a
+ * partial stage of the groups' keys and each aggregate's state,
+ * serialized, and the final stage over it, which combines the states of a
+ * group it is handed and finishes them, its own target list and qual over
+ * them; false where stages_ok() is not.
+ */
+static bool
+make_stages(OrcaParallel *op, Plan *lower, Agg *agg, Agg **partialp, Agg **finalp)
+{
+	Plan	   *below = lower->lefttree;
+	FinalStage	fs;
+	Agg		   *partial;
+	Agg		   *final;
+	int			resno = 0;
+
+	if (!stages_ok(op, lower, agg))
+		return false;
 
 	memset(&fs, 0, sizeof(fs));
 	fs.agg = agg;
 	(void) collect_aggrefs((Node *) agg->plan.targetlist, &fs.aggrefs);
 	(void) collect_aggrefs((Node *) agg->plan.qual, &fs.aggrefs);
-	foreach_node(Aggref, aggref, fs.aggrefs)
-		if (!OidIsValid(aggref->aggtranstype) || !combinable(aggref))
-			return NULL;
 
 	/* the partial stage's columns: the keys, then each aggregate's state */
 	for (int i = 0; i < agg->numCols; i++)
 	{
 		TargetEntry *key = get_tle_by_resno(below->targetlist, agg->grpColIdx[i]);
 
-		if (key == NULL)
-			return NULL;
 		fs.partial = lappend(fs.partial,
 							 makeTargetEntry((Expr *) makeVarFromTargetEntry(OUTER_VAR, key),
 											 ++resno, NULL, false));
@@ -1195,16 +1345,7 @@ two_stage(OrcaParallel *op, Plan *lower, Agg *agg)
 	final->plan.targetlist = (List *) final_mutator((Node *) agg->plan.targetlist, &fs);
 	final->plan.qual = (List *) final_mutator((Node *) agg->plan.qual, &fs);
 	if (fs.failed)
-		return NULL;
-
-	/* each participant's groups, which the final stage reads */
-	if (!splits(op, below, &share) ||
-		!pays(op, &share,
-			  split_cpu(op, below) + below->plan_rows * cpu_operator_cost *
-			  (list_length(fs.aggrefs) + agg->numCols),
-			  agg->plan.plan_rows * (share.workers + 1)))
-		return NULL;
-	mark_split(op, below, &share);
+		return false;
 
 	partial = makeNode(Agg);
 	partial->plan.targetlist = fs.partial;
@@ -1244,6 +1385,43 @@ two_stage(OrcaParallel *op, Plan *lower, Agg *agg)
 	final->grpCollations = agg->grpCollations;
 	final->numGroups = agg->numGroups;
 	final->transitionSpace = agg->transitionSpace;
+
+	*partialp = partial;
+	*finalp = final;
+	return true;
+}
+
+/*
+ * NOT IN CLOUDBERRY.  On one node, an aggregate ORCA planned in one stage
+ * (AGGSPLIT_SIMPLE), lower, which agg is -- or which a vector engine's
+ * node, lower, stands for -- over a subtree a Gather's participants split,
+ * done in two around it (make_stages()): the partial stage in each
+ * participant, below the Gather, and the final stage above it.  A plain or
+ * hashed aggregate only, the Gather's rows being in no order.  Each stage
+ * is offered to the vector engine, whose node lower may have been.
+ */
+static Plan *
+two_stage(OrcaParallel *op, Plan *lower, Agg *agg)
+{
+	Plan	   *below = lower->lefttree;
+	Share		share;
+	Agg		   *partial;
+	Agg		   *final;
+	Plan	   *gathered;
+	int			naggs = 0;
+
+	if (!make_stages(op, lower, agg, &partial, &final))
+		return NULL;
+	naggs = list_length(partial->plan.targetlist) - agg->numCols;
+
+	/* each participant's groups, which the final stage reads */
+	if (!splits(op, below, &share) ||
+		!pays(op, &share,
+			  split_cpu(op, below) + below->plan_rows * cpu_operator_cost *
+			  (naggs + agg->numCols),
+			  agg->plan.plan_rows * (share.workers + 1)))
+		return NULL;
+	partial->plan.lefttree = mark_split(op, below, &share);
 
 	gathered = gp_orca_vector_offer(&partial->plan, op->stmt->rtable);
 	gathered->parallel_safe = true;
@@ -1435,11 +1613,32 @@ node_walk(OrcaParallel *op, Plan *plan)
 
 	check_stack_depth();
 
+	/*
+	 * an aggregate of one stage: in two around the Gather, where its partial
+	 * groups cost little to pass -- before in three below it, which deal
+	 * them among the participants at a price of their own, which the
+	 * engine weighs against a Gather below the aggregate, where the walk
+	 * goes on to (repartitions(), at a Gather's top)
+	 */
+	{
+		GpOrcaVecNode vn;
+		Agg		   *agg = IsA(plan, Agg) ? (Agg *) plan :
+			IsA(plan, CustomScan) && vec_kind(plan, &vn) == GP_ORCA_VEC_AGG ? vn.agg : NULL;
+
+		if (agg != NULL && agg->aggsplit == AGGSPLIT_SIMPLE)
+		{
+			Plan	   *upper = split_stages(op, plan, agg);
+
+			if (upper != NULL)
+				return upper;
+		}
+	}
+
 	/* the largest subtree the participants can split, if a Gather pays */
 	if (splits(op, plan, &share) &&
 		pays(op, &share, split_cpu(op, plan), plan->plan_rows))
 	{
-		mark_split(op, plan, &share);
+		plan = mark_split(op, plan, &share);
 		return make_gather(op, plan, share.workers);
 	}
 
@@ -1807,6 +2006,7 @@ GpOrcaParallelize(PlannedStmt *stmt, Query *query, int cursorOptions)
 	}
 	op.one_node = IS_SINGLENODE();
 	op.made = false;
+	op.under_join = 0;
 
 	if (!op.one_node)
 	{
