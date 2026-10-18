@@ -103,6 +103,12 @@
  *   each Gather with a parameter of its own that a rescan of it changes,
  *   as the planner's has (rescan_param);
  *
+ *   a hash join whose inner side the participants split too, each hashing
+ *   its share into one table they share -- PostgreSQL's Parallel Hash
+ *   (shares_table()), a right and a full join among them -- and, for one
+ *   whose inner side each reads whole, aggregates and sorts on that side
+ *   too (whole_in_each());
+ *
  *   the subplans of initplans and of CTEs, which run once, as the nodes
  *   they belong to do; an initplan's value read below a Gather is computed
  *   by the backend and passed to its workers (Gather.initParam), as the
@@ -351,6 +357,15 @@ engine_workers(Scan *scan, Relation rel, Share *share, int workers)
 	return Min(answer, max_parallel_workers_per_gather);
 }
 
+/* The participants' part a share's workers make (get_parallel_divisor()). */
+static void
+share_divisor(Share *share)
+{
+	share->divisor = share->workers;
+	if (parallel_leader_participation && 1.0 - 0.3 * share->workers > 0)
+		share->divisor += 1.0 - 0.3 * share->workers;
+}
+
 /* A sequential scan that can drive a split subtree, and its share. */
 static bool
 scan_share(OrcaParallel *op, Scan *scan, Share *share)
@@ -377,16 +392,37 @@ scan_share(OrcaParallel *op, Scan *scan, Share *share)
 											 max_parallel_workers_per_gather);
 	share->workers = engine_workers(scan, rel, share, share->workers);
 	table_close(rel, NoLock);
-	share->divisor = share->workers;
-	if (parallel_leader_participation && 1.0 - 0.3 * share->workers > 0)
-		share->divisor += 1.0 - 0.3 * share->workers;
+	share_divisor(share);
 	return share->workers > 0;
+}
+
+/*
+ * NOT IN CLOUDBERRY.  A split subtree's share widened by the inner side of
+ * a table its participants share: the Gather given the workers of the
+ * larger of the two drivers.  The outer side's scan hands its pages out to
+ * as many participants as come, and the inner side may be the larger work
+ * -- a fact table's scan below the shared table of a dimension's join,
+ * whose own driver PostgreSQL's rule gives one worker (TPC-DS 50 and 90),
+ * which the Gather's workers were before, the fact table's scan read with
+ * as few.
+ */
+static void
+share_widen(Share *share, const Share *inner)
+{
+	if (inner->workers <= share->workers)
+		return;
+	share->workers = inner->workers;
+	share_divisor(share);
 }
 
 /*
  * Can a subtree run whole in each participant, as the inner side of a join
  * split among them: sequential scans, hash joins and their hashes, and
- * projections, of expressions a worker may compute.
+ * projections, of expressions a worker may compute; on one node, aggregates
+ * and sorts too, which each participant computes whole as PostgreSQL's
+ * planner has its workers compute a join's inner side of them (TPC-H q18's
+ * IN of a grouping with HAVING) -- where that is cheap beside the split
+ * outer side (whole_pays()).
  */
 static bool
 whole_in_each(OrcaParallel *op, Plan *plan)
@@ -413,9 +449,22 @@ whole_in_each(OrcaParallel *op, Plan *plan)
 					if (!is_parallel_safe(op->root, (Node *) vn.exprs))
 						return false;
 					break;
+				case GP_ORCA_VEC_AGG:
+				case GP_ORCA_VEC_SORT:
+					if (!op->one_node || !is_parallel_safe(op->root, (Node *) vn.exprs))
+						return false;
+					break;
 				default:
 					return false;
 			}
+			break;
+		case T_Agg:
+			if (!op->one_node || ((Agg *) plan)->aggstrategy == AGG_MIXED)
+				return false;
+			break;
+		case T_Sort:
+			if (!op->one_node)
+				return false;
 			break;
 		case T_Hash:
 			if (!is_parallel_safe(op->root, (Node *) ((Hash *) plan)->hashkeys))
@@ -452,6 +501,67 @@ partial_stage(OrcaParallel *op, Agg *agg)
 		agg->groupingSets == NIL && agg->chain == NIL && agg->plan.qual == NIL;
 }
 
+static bool shares_table(OrcaParallel *op, HashJoin *hj, Share *inner);
+static bool vec_shares_table(OrcaParallel *op, Plan *join, GpOrcaVecNode *vn,
+							 Share *inner);
+
+/* Does a subtree hold an aggregate or a sort, a vector engine's too? */
+static bool
+holds_agg(Plan *plan)
+{
+	GpOrcaVecNode vn;
+
+	for (; plan != NULL; plan = plan->lefttree)
+	{
+		check_stack_depth();
+		if (IsA(plan, Agg) || IsA(plan, Sort) ||
+			(IsA(plan, CustomScan) &&
+			 (vec_kind(plan, &vn) == GP_ORCA_VEC_AGG || vn.kind == GP_ORCA_VEC_SORT)))
+			return true;
+		if (plan->righttree != NULL && holds_agg(plan->righttree))
+			return true;
+	}
+	return false;
+}
+
+/*
+ * The rows a subtree's leaves give, its scans', by ORCA's estimates: the
+ * rows its work starts from.
+ */
+static double
+leaf_rows(Plan *plan)
+{
+	double		rows = 0;
+
+	for (; plan != NULL; plan = plan->lefttree)
+	{
+		check_stack_depth();
+		if (plan->lefttree == NULL && plan->righttree == NULL)
+			rows += plan->plan_rows;
+		if (plan->righttree != NULL)
+			rows += leaf_rows(plan->righttree);
+	}
+	return rows;
+}
+
+/*
+ * NOT IN CLOUDBERRY.  May each participant compute a join's inner side
+ * whole, against its split outer side: where the inner side holds an
+ * aggregate or a sort, only where its scans give at most a tenth of the
+ * rows the outer side's give, by ORCA's estimates -- not by its costs, whose
+ * scans each start at a fixed part that puts a small table's near a large
+ * one's.  Each participant repeats the inner side's work at once; where it
+ * is the plan's larger part -- TPC-H q18's, q17's and q21's aggregations
+ * over lineitem, TPC-DS's over a fact table -- the walk goes on below and
+ * splits that work instead, as it did before such a side could run whole:
+ * computed whole there, those queries ran slower than without workers.
+ */
+static bool
+whole_pays(Plan *outer, Plan *inner)
+{
+	return !holds_agg(inner) || leaf_rows(inner) * 10 <= leaf_rows(outer);
+}
+
 /*
  * Can a subtree be split among a Gather's participants: a sequential scan
  * that shares itself among them, the driver, below the outer sides of hash
@@ -459,7 +569,10 @@ partial_stage(OrcaParallel *op, Agg *agg)
  * semi or anti join, where an outer row meets every inner row in the one
  * participant that reads it; not a right or full join, whose unmatched
  * inner rows every participant would return -- and projections; on one
- * node, partial stages of aggregates too (partial_stage()).
+ * node, partial stages of aggregates too (partial_stage()), and hash joins
+ * whose inner sides the participants split as well and hash into one table
+ * they share (shares_table()), of any of those join types, a right and a
+ * full one among them.
  */
 static bool
 splits(OrcaParallel *op, Plan *plan, Share *share)
@@ -486,12 +599,24 @@ splits(OrcaParallel *op, Plan *plan, Share *share)
 					return partial_stage(op, vn.agg) &&
 						splits(op, plan->lefttree, share);
 				case GP_ORCA_VEC_HASHJOIN:
-					if ((vn.jointype != JOIN_INNER && vn.jointype != JOIN_LEFT &&
-						 vn.jointype != JOIN_SEMI && vn.jointype != JOIN_ANTI) ||
-						!is_parallel_safe(op->root, (Node *) vn.exprs))
-						return false;
-					return whole_in_each(op, plan->righttree) &&
-						splits(op, plan->lefttree, share);
+					{
+						Share		inner;
+
+						if ((vn.jointype != JOIN_INNER && vn.jointype != JOIN_LEFT &&
+							 vn.jointype != JOIN_SEMI && vn.jointype != JOIN_ANTI) ||
+							!is_parallel_safe(op->root, (Node *) vn.exprs))
+							return false;
+						if (vec_shares_table(op, plan, &vn, &inner))
+						{
+							if (!splits(op, plan->lefttree, share))
+								return false;
+							share_widen(share, &inner);
+							return true;
+						}
+						return whole_in_each(op, plan->righttree) &&
+							whole_pays(plan->lefttree, plan->righttree) &&
+							splits(op, plan->lefttree, share);
+					}
 				case GP_ORCA_VEC_RESULT:
 					return plan->lefttree != NULL &&
 						is_parallel_safe(op->root, (Node *) vn.exprs) &&
@@ -503,14 +628,24 @@ splits(OrcaParallel *op, Plan *plan, Share *share)
 			{
 				HashJoin   *hj = (HashJoin *) plan;
 				JoinType	jointype = hj->join.jointype;
+				Share		inner;
 
-				if ((jointype != JOIN_INNER && jointype != JOIN_LEFT &&
-					 jointype != JOIN_SEMI && jointype != JOIN_ANTI) ||
-					!is_parallel_safe(op->root, (Node *) hj->join.joinqual) ||
+				if (!is_parallel_safe(op->root, (Node *) hj->join.joinqual) ||
 					!is_parallel_safe(op->root, (Node *) hj->hashclauses) ||
 					!is_parallel_safe(op->root, (Node *) hj->hashkeys))
 					return false;
+				if (shares_table(op, hj, &inner))
+				{
+					if (!splits(op, plan->lefttree, share))
+						return false;
+					share_widen(share, &inner);
+					return true;
+				}
+				if (jointype != JOIN_INNER && jointype != JOIN_LEFT &&
+					jointype != JOIN_SEMI && jointype != JOIN_ANTI)
+					return false;
 				return whole_in_each(op, plan->righttree) &&
+					whole_pays(plan->lefttree, plan->righttree) &&
 					splits(op, plan->lefttree, share);
 			}
 		case T_Result:
@@ -522,23 +657,32 @@ splits(OrcaParallel *op, Plan *plan, Share *share)
 	}
 }
 
+static double table_cpu(OrcaParallel *op, Plan *inner_top, int nkeys, Share *inner);
+
 /*
  * The CPU a split subtree spends above its driver on each row, which the
  * participants divide as they divide the scan's: a hash join's probes, and
- * a partial stage's transitions, an operator's cost a column.
+ * a partial stage's transitions, an operator's cost a column; and all that
+ * a shared table's inner side spends, its build too (table_cpu()).
  */
 static double
-split_cpu(Plan *plan)
+split_cpu(OrcaParallel *op, Plan *plan)
 {
 	double		cpu = 0;
 	GpOrcaVecNode vn;
+	Share		inner;
 
 	for (; plan != NULL && !is_seqscan(plan); plan = plan->lefttree)
 	{
 		if (IsA(plan, HashJoin))
+		{
 			cpu += plan->lefttree->plan_rows *
 				(cpu_operator_cost * list_length(((HashJoin *) plan)->hashclauses) +
 				 cpu_tuple_cost);
+			if (shares_table(op, (HashJoin *) plan, &inner))
+				cpu += table_cpu(op, plan->righttree->lefttree,
+								 list_length(((Hash *) plan->righttree)->hashkeys), &inner);
+		}
 		else if (IsA(plan, Agg))
 			cpu += plan->lefttree->plan_rows * cpu_operator_cost *
 				list_length(plan->targetlist);
@@ -548,6 +692,8 @@ split_cpu(Plan *plan)
 				case GP_ORCA_VEC_HASHJOIN:
 					cpu += plan->lefttree->plan_rows *
 						(cpu_operator_cost * vn.nhashclauses + cpu_tuple_cost);
+					if (vec_shares_table(op, plan, &vn, &inner))
+						cpu += table_cpu(op, plan->righttree, vn.nhashclauses, &inner);
 					break;
 				case GP_ORCA_VEC_AGG:
 					cpu += plan->lefttree->plan_rows * cpu_operator_cost *
@@ -582,15 +728,116 @@ pays(OrcaParallel *op, Share *share, double cpu, double rows)
 }
 
 /*
+ * What the participants spend on a shared table, which they divide among
+ * them: its inner side's driver's rows and its own CPU above them
+ * (split_cpu()), and the table's build, a hash a key and a tuple's
+ * processing an inner row (cost_hashjoin()'s).
+ */
+static double
+table_cpu(OrcaParallel *op, Plan *inner_top, int nkeys, Share *inner)
+{
+	QualCost	qual;
+
+	cost_qual_eval(&qual, inner->driver->plan.qual, op->root);
+	return inner->tuples * (cpu_tuple_cost + qual.per_tuple) +
+		split_cpu(op, inner_top) +
+		inner_top->plan_rows * (cpu_operator_cost * nkeys + cpu_tuple_cost);
+}
+
+/*
+ * NOT IN CLOUDBERRY.  On one node, can a hash join of a subtree the
+ * participants split share its table among them, PostgreSQL's Parallel Hash
+ * (nodeHash.c, ExecParallelHashTableAlloc() and its kin): a HashJoin of
+ * PostgreSQL's under enable_parallel_hash, its inner side below its Hash
+ * split among the participants too, by a driver of its own, each inserting
+ * its share into the one table, which all of them probe once it is built --
+ * where a parallel-oblivious join has each of them build the whole table
+ * alone (TPC-H q21's two scans of lineitem on its inner side).  PostgreSQL's
+ * executor joins so an inner, a left, a semi and an anti join, and a right
+ * and a full one, whose unmatched inner rows the participants return from
+ * the one table, each its share of them.  PostgreSQL's planner chooses
+ * between the shared and the oblivious join by their costs
+ * (hash_inner_and_outer()); the pass shares the table where one
+ * participant's part of its inner side's and its build's CPU saves more
+ * than a thousand tuples' processing, the table's barriers aside.
+ */
+static bool
+shares_table(OrcaParallel *op, HashJoin *hj, Share *inner)
+{
+	Plan	   *hash = hj->join.plan.righttree;
+	JoinType	jointype = hj->join.jointype;
+
+	if (!op->one_node || !enable_parallel_hash || hash == NULL || !IsA(hash, Hash) ||
+		(jointype != JOIN_INNER && jointype != JOIN_LEFT && jointype != JOIN_SEMI &&
+		 jointype != JOIN_ANTI && jointype != JOIN_RIGHT && jointype != JOIN_FULL) ||
+		!node_safe(op, hash) ||
+		!is_parallel_safe(op->root, (Node *) ((Hash *) hash)->hashkeys) ||
+		!splits(op, hash->lefttree, inner))
+		return false;
+	return table_cpu(op, hash->lefttree, list_length(((Hash *) hash)->hashkeys), inner) *
+		(1.0 - 1.0 / inner->divisor) > 1000 * cpu_tuple_cost;
+}
+
+/*
+ * NOT IN CLOUDBERRY.  On one node, may a vector engine's hash join of a
+ * subtree the participants split share its table among them, as
+ * shares_table() has PostgreSQL's (gp_orca_vec.h, shares_table, from its
+ * minor version 4): the engine says its node may, an inner, a left, a semi
+ * or an anti join, its inner side -- righttree, which the engine's node
+ * hashes itself, with no Hash -- split among them too, by a driver of its
+ * own, and the work saved as shares_table()'s.
+ */
+static bool
+vec_shares_table(OrcaParallel *op, Plan *join, GpOrcaVecNode *vn, Share *inner)
+{
+	const GpOrcaVecRoutine *engine;
+
+	if (!op->one_node || join->righttree == NULL ||
+		(vn->jointype != JOIN_INNER && vn->jointype != JOIN_LEFT &&
+		 vn->jointype != JOIN_SEMI && vn->jointype != JOIN_ANTI))
+		return false;
+	engine = gp_orca_vec_find();
+	if (engine == NULL || !GP_ORCA_VEC_HAS(engine, shares_table) ||
+		!engine->shares_table(join) || !splits(op, join->righttree, inner))
+		return false;
+	return table_cpu(op, join->righttree, vn->nhashclauses, inner) *
+		(1.0 - 1.0 / inner->divisor) > 1000 * cpu_tuple_cost;
+}
+
+/*
  * A subtree split among the participants: its driver parallel-aware, and
  * each node's rows those of one participant, as the planner's partial paths
- * estimate them; what each reads whole is left as it is.
+ * estimate them; what each reads whole is left as it is.  A shared table's
+ * hash join and its Hash parallel-aware, the Hash told the rows of all
+ * participants it is sized by (create_hashjoin_plan()'s rows_total), and
+ * its inner side split as well; a vector engine's hash join that shares
+ * its table parallel-aware, its inner side split.
  */
 static void
-mark_split(Plan *plan, Share *share)
+mark_split(OrcaParallel *op, Plan *plan, Share *share)
 {
+	Share		inner;
+	GpOrcaVecNode vn;
+
 	for (; plan != NULL; plan = plan->lefttree)
 	{
+		if (IsA(plan, HashJoin) && shares_table(op, (HashJoin *) plan, &inner))
+		{
+			Plan	   *hash = plan->righttree;
+
+			plan->parallel_aware = true;
+			hash->parallel_aware = true;
+			hash->parallel_safe = true;
+			((Hash *) hash)->rows_total = hash->lefttree->plan_rows;
+			hash->plan_rows = clamp_row_est(hash->plan_rows / inner.divisor);
+			mark_split(op, hash->lefttree, &inner);
+		}
+		else if (IsA(plan, CustomScan) && vec_kind(plan, &vn) == GP_ORCA_VEC_HASHJOIN &&
+				 vec_shares_table(op, plan, &vn, &inner))
+		{
+			plan->parallel_aware = true;
+			mark_split(op, plan->righttree, &inner);
+		}
 		plan->parallel_safe = true;
 		plan->plan_rows = clamp_row_est(plan->plan_rows / share->divisor);
 		if (plan->righttree != NULL)
@@ -601,6 +848,28 @@ mark_split(Plan *plan, Share *share)
 			break;
 		}
 	}
+}
+
+/*
+ * A Gather's rescan parameter, which each parallel-aware node below it
+ * depends on, and each node above one, as finalize_plan() has them; whether
+ * the subtree holds one.
+ */
+static bool
+rescan_depends(Plan *plan, int param)
+{
+	bool		below;
+
+	if (plan == NULL)
+		return false;
+	check_stack_depth();
+	below = rescan_depends(plan->lefttree, param);
+	below = rescan_depends(plan->righttree, param) || below;
+	if (!below && !plan->parallel_aware)
+		return false;
+	plan->extParam = bms_add_member(bms_copy(plan->extParam), param);
+	plan->allParam = bms_add_member(bms_copy(plan->allParam), param);
+	return true;
 }
 
 /* A Gather over a plan, passing on its columns as they are. */
@@ -654,13 +923,7 @@ make_gather(OrcaParallel *op, Plan *plan, int workers)
 	{
 		gather->rescan_param = list_length(op->stmt->paramExecTypes);
 		op->stmt->paramExecTypes = lappend_oid(op->stmt->paramExecTypes, InvalidOid);
-		for (Plan *below = plan; below != NULL; below = below->lefttree)
-		{
-			below->extParam = bms_add_member(bms_copy(below->extParam), gather->rescan_param);
-			below->allParam = bms_add_member(bms_copy(below->allParam), gather->rescan_param);
-			if (below->parallel_aware)
-				break;
-		}
+		(void) rescan_depends(plan, gather->rescan_param);
 	}
 	op->made = true;
 	return &gather->plan;
@@ -756,7 +1019,7 @@ three_stage(OrcaParallel *op, Plan *lower, Agg *agg)
 	/* each participant's groups, which the combining stage reads */
 	if (!splits(op, below, &share) ||
 		!pays(op, &share,
-			  split_cpu(below) + below->plan_rows * cpu_operator_cost * (naggs + agg->numCols),
+			  split_cpu(op, below) + below->plan_rows * cpu_operator_cost * (naggs + agg->numCols),
 			  agg->plan.plan_rows * (share.workers + 1)))
 		return NULL;
 
@@ -788,7 +1051,7 @@ three_stage(OrcaParallel *op, Plan *lower, Agg *agg)
 	upper->plan.plan_width = agg->plan.plan_width;
 	upper->plan.plan_node_id = op->next_node_id++;
 
-	mark_split(below, &share);
+	mark_split(op, below, &share);
 	lower->parallel_safe = true;
 	upper->plan.lefttree = make_gather(op, lower, share.workers);
 	return &upper->plan;
@@ -937,11 +1200,11 @@ two_stage(OrcaParallel *op, Plan *lower, Agg *agg)
 	/* each participant's groups, which the final stage reads */
 	if (!splits(op, below, &share) ||
 		!pays(op, &share,
-			  split_cpu(below) + below->plan_rows * cpu_operator_cost *
+			  split_cpu(op, below) + below->plan_rows * cpu_operator_cost *
 			  (list_length(fs.aggrefs) + agg->numCols),
 			  agg->plan.plan_rows * (share.workers + 1)))
 		return NULL;
-	mark_split(below, &share);
+	mark_split(op, below, &share);
 
 	partial = makeNode(Agg);
 	partial->plan.targetlist = fs.partial;
@@ -1174,9 +1437,9 @@ node_walk(OrcaParallel *op, Plan *plan)
 
 	/* the largest subtree the participants can split, if a Gather pays */
 	if (splits(op, plan, &share) &&
-		pays(op, &share, split_cpu(plan), plan->plan_rows))
+		pays(op, &share, split_cpu(op, plan), plan->plan_rows))
 	{
-		mark_split(plan, &share);
+		mark_split(op, plan, &share);
 		return make_gather(op, plan, share.workers);
 	}
 
@@ -1418,10 +1681,26 @@ gathers_marked(PlannedStmt *stmt)
 /*
  * A plan's Gathers taken out: each replaced by what is below it, whose
  * columns a Gather passes on as they are (make_gather()), run whole by the
- * one process -- the scan that drove it no longer parallel-aware, and an
+ * one process -- no node below it parallel-aware (not_parallel()), and an
  * aggregate's final stage combining the one partial state below it -- as
  * gp_core's strip_gathers() runs a segment's fragment (gp_parallel.c).
  */
+/*
+ * A Gather's subtree run by one process: no node of it parallel-aware --
+ * the scans of a shared table's inner side neither, nor its joins -- each
+ * a node of its own, as without parallel mode.
+ */
+static void
+not_parallel(Plan *plan)
+{
+	for (; plan != NULL; plan = plan->lefttree)
+	{
+		check_stack_depth();
+		plan->parallel_aware = false;
+		not_parallel(plan->righttree);
+	}
+}
+
 static Plan *
 strip_gathers(Plan *plan)
 {
@@ -1430,8 +1709,7 @@ strip_gathers(Plan *plan)
 	check_stack_depth();
 	if (IsA(plan, Gather))
 	{
-		for (Plan *below = plan->lefttree; below != NULL; below = below->lefttree)
-			below->parallel_aware = false;
+		not_parallel(plan->lefttree);
 		return strip_gathers(plan->lefttree);
 	}
 	plan->lefttree = strip_gathers(plan->lefttree);
