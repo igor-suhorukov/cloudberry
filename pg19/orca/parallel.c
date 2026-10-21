@@ -73,7 +73,12 @@
  *   plan of vector nodes gets the Gathers ORCA's plan of row nodes would,
  *   and the engine's scans below them share their tables among the
  *   Gather's participants (pg_vector_executor.md §3.10, V4), as many as the
- *   engine gives its scan where it says (engine_workers()).
+ *   engine gives its scan where it says (engine_workers()); and, from
+ *   gp_orca_vec.h's minor version 6, its append of vector children, whose
+ *   branches a Gather above it splits each by a driver of its own, every
+ *   participant reading every branch in turn, or which the walk goes
+ *   through branch by branch, as through an Append (pg_vector_executor.md
+ *   §3.22's T6).
  *
  * NOT IN CLOUDBERRY, whose ORCA makes no parallel plan on one node
  * (gpdb::IsParallelModeOK()): on one node -- gp_orca's single-node build,
@@ -302,7 +307,9 @@ shares_scan(Relation rel)
  * What a Gather's participants share: the sequential scan that drives the
  * subtree split among them, its table's share on a segment -- pages and
  * rows, as ANALYZE counted the whole -- and the workers PostgreSQL's rule
- * gives it (compute_parallel_worker()).
+ * gives it (compute_parallel_worker()); and, NOT IN CLOUDBERRY, the rows
+ * each of them reads whole above it, the inner sides of the hash joins
+ * whose tables they do not share (read_rows()).
  */
 typedef struct Share
 {
@@ -311,6 +318,7 @@ typedef struct Share
 	double		tuples;
 	int			workers;
 	double		divisor;		/* get_parallel_divisor()'s */
+	double		whole;			/* the rows each participant reads whole */
 } Share;
 
 /* May a worker compute a node's own expressions? */
@@ -390,6 +398,7 @@ scan_share(OrcaParallel *op, Scan *scan, Share *share)
 	share->driver = scan;
 	share->pages = (double) rel->rd_rel->relpages / op->nsegments;
 	share->tuples = rel->rd_rel->reltuples / op->nsegments;
+	share->whole = 0;
 	dummy = makeNode(RelOptInfo);
 	dummy->reloptkind = RELOPT_BASEREL;
 	dummy->rel_parallel_workers = RelationGetParallelWorkers(rel, -1);
@@ -458,6 +467,12 @@ whole_in_each(OrcaParallel *op, Plan *plan)
 				case GP_ORCA_VEC_SORT:
 					if (!op->one_node || !is_parallel_safe(op->root, (Node *) vn.exprs))
 						return false;
+					break;
+				case GP_ORCA_VEC_APPEND:
+					/* its branches past the first, each read whole by each */
+					foreach_ptr(Plan, child, ((CustomScan *) plan)->custom_plans)
+						if (!whole_in_each(op, child))
+							return false;
 					break;
 				default:
 					return false;
@@ -571,6 +586,10 @@ holds_agg(Plan *plan)
 			return true;
 		if (plan->righttree != NULL && holds_agg(plan->righttree))
 			return true;
+		if (IsA(plan, CustomScan) && vec_kind(plan, &vn) == GP_ORCA_VEC_APPEND)
+			foreach_ptr(Plan, child, ((CustomScan *) plan)->custom_plans)
+				if (holds_agg(child))
+					return true;
 	}
 	return false;
 }
@@ -583,6 +602,7 @@ static double
 leaf_rows(Plan *plan)
 {
 	double		rows = 0;
+	GpOrcaVecNode vn;
 
 	for (; plan != NULL; plan = plan->lefttree)
 	{
@@ -591,6 +611,45 @@ leaf_rows(Plan *plan)
 			rows += plan->plan_rows;
 		if (plan->righttree != NULL)
 			rows += leaf_rows(plan->righttree);
+		if (IsA(plan, CustomScan) && vec_kind(plan, &vn) == GP_ORCA_VEC_APPEND)
+			foreach_ptr(Plan, child, ((CustomScan *) plan)->custom_plans)
+				rows += leaf_rows(child);
+	}
+	return rows;
+}
+
+/*
+ * NOT IN CLOUDBERRY.  The rows a subtree's sequential scans read: their
+ * tables' on a segment, as ANALYZE counted them -- not what the scans give
+ * by ORCA's estimates, which a filter makes small where the scan is not
+ * (TPC-DS 76's scan of web_sales for its few rows of no customer).
+ */
+static double
+read_rows(OrcaParallel *op, Plan *plan)
+{
+	double		rows = 0;
+	GpOrcaVecNode vn;
+
+	for (; plan != NULL; plan = plan->lefttree)
+	{
+		check_stack_depth();
+		if (is_seqscan(plan))
+		{
+			RangeTblEntry *rte = rt_fetch(((Scan *) plan)->scanrelid, op->stmt->rtable);
+
+			if (rte->rtekind == RTE_RELATION)
+			{
+				Relation	rel = table_open(rte->relid, AccessShareLock);
+
+				rows += Max(rel->rd_rel->reltuples, 0) / op->nsegments;
+				table_close(rel, NoLock);
+			}
+		}
+		if (plan->righttree != NULL)
+			rows += read_rows(op, plan->righttree);
+		if (IsA(plan, CustomScan) && vec_kind(plan, &vn) == GP_ORCA_VEC_APPEND)
+			foreach_ptr(Plan, child, ((CustomScan *) plan)->custom_plans)
+				rows += read_rows(op, child);
 	}
 	return rows;
 }
@@ -663,16 +722,52 @@ splits(OrcaParallel *op, Plan *plan, Share *share)
 							if (!side_splits(op, plan->lefttree, share))
 								return false;
 							share_widen(share, &inner);
+							share->whole += inner.whole;
 							return true;
 						}
-						return whole_in_each(op, plan->righttree) &&
-							whole_pays(plan->lefttree, plan->righttree) &&
-							side_splits(op, plan->lefttree, share);
+						if (!whole_in_each(op, plan->righttree) ||
+							!whole_pays(plan->lefttree, plan->righttree) ||
+							!side_splits(op, plan->lefttree, share))
+							return false;
+						share->whole += read_rows(op, plan->righttree);
+						return true;
 					}
 				case GP_ORCA_VEC_RESULT:
 					return plan->lefttree != NULL &&
 						is_parallel_safe(op->root, (Node *) vn.exprs) &&
 						splits(op, plan->lefttree, share);
+				case GP_ORCA_VEC_APPEND:
+					{
+						Share		branch;
+
+						/*
+						 * NOT IN CLOUDBERRY: every branch split, each by a
+						 * driver of its own, every participant reading each in
+						 * turn: the Gather given the workers of the widest
+						 * branch, the drivers' pages and rows together;
+						 * mark_split() splits each by its own again.  Not
+						 * where a branch's participants would each read more
+						 * rows whole than its driver splits among them -- a
+						 * small table's scan driving it, a fact table's on
+						 * its inner side (TPC-DS 76): one Gather pays for the
+						 * branches together, which no branch has to pay alone,
+						 * and the walk goes branch by branch then, a Gather
+						 * of its own over such a branch's larger scan
+						 */
+						if (plan->lefttree == NULL || !splits(op, plan->lefttree, share) ||
+							share->whole > share->tuples)
+							return false;
+						foreach_ptr(Plan, child, ((CustomScan *) plan)->custom_plans)
+						{
+							if (!splits(op, child, &branch) || branch.whole > branch.tuples)
+								return false;
+							share->pages += branch.pages;
+							share->tuples += branch.tuples;
+							share->whole += branch.whole;
+							share_widen(share, &branch);
+						}
+						return true;
+					}
 				default:
 					return false;
 			}
@@ -691,14 +786,18 @@ splits(OrcaParallel *op, Plan *plan, Share *share)
 					if (!side_splits(op, plan->lefttree, share))
 						return false;
 					share_widen(share, &inner);
+					share->whole += inner.whole;
 					return true;
 				}
 				if (jointype != JOIN_INNER && jointype != JOIN_LEFT &&
 					jointype != JOIN_SEMI && jointype != JOIN_ANTI)
 					return false;
-				return whole_in_each(op, plan->righttree) &&
-					whole_pays(plan->lefttree, plan->righttree) &&
-					side_splits(op, plan->lefttree, share);
+				if (!whole_in_each(op, plan->righttree) ||
+					!whole_pays(plan->lefttree, plan->righttree) ||
+					!side_splits(op, plan->lefttree, share))
+					return false;
+				share->whole += read_rows(op, plan->righttree);
+				return true;
 			}
 		case T_Result:
 			return plan->lefttree != NULL &&
@@ -752,6 +851,10 @@ split_cpu(OrcaParallel *op, Plan *plan)
 				case GP_ORCA_VEC_AGG:
 					cpu += plan->lefttree->plan_rows * cpu_operator_cost *
 						list_length(plan->targetlist);
+					break;
+				case GP_ORCA_VEC_APPEND:
+					foreach_ptr(Plan, child, ((CustomScan *) plan)->custom_plans)
+						cpu += split_cpu(op, child);
 					break;
 				default:
 					break;
@@ -958,6 +1061,20 @@ mark_split(OrcaParallel *op, Plan *top, Share *share)
 			plan->parallel_aware = true;
 			plan->righttree = mark_split(op, plan->righttree, &inner);
 		}
+		else if (IsA(plan, CustomScan) && vec_kind(plan, &vn) == GP_ORCA_VEC_APPEND)
+		{
+			ListCell   *lc;
+
+			/* its branches past the first, each split by its own driver */
+			foreach(lc, ((CustomScan *) plan)->custom_plans)
+			{
+				Share		branch;
+
+				if (!splits(op, (Plan *) lfirst(lc), &branch))
+					elog(ERROR, "gp_orca: a vector append's branch that split no longer splits");
+				lfirst(lc) = mark_split(op, (Plan *) lfirst(lc), &branch);
+			}
+		}
 		plan->parallel_safe = true;
 		plan->plan_rows = clamp_row_est(plan->plan_rows / share->divisor);
 		if (plan->righttree != NULL)
@@ -986,6 +1103,9 @@ rescan_depends(Plan *plan, int param)
 	check_stack_depth();
 	below = rescan_depends(plan->lefttree, param);
 	below = rescan_depends(plan->righttree, param) || below;
+	if (IsA(plan, CustomScan))
+		foreach_ptr(Plan, child, ((CustomScan *) plan)->custom_plans)
+			below = rescan_depends(child, param) || below;
 	if (!below && !plan->parallel_aware)
 		return false;
 	plan->extParam = bms_add_member(bms_copy(plan->extParam), param);
@@ -1690,6 +1810,16 @@ node_walk(OrcaParallel *op, Plan *plan)
 						plan->lefttree = fragment_walk(op, plan->lefttree);
 						plan->righttree = fragment_walk(op, plan->righttree);
 						break;
+					case GP_ORCA_VEC_APPEND:
+						{
+							ListCell   *lc;
+
+							/* branch by branch, as an Append's */
+							plan->lefttree = fragment_walk(op, plan->lefttree);
+							foreach(lc, ((CustomScan *) plan)->custom_plans)
+								lfirst(lc) = fragment_walk(op, (Plan *) lfirst(lc));
+							break;
+						}
 					default:
 						break;
 				}
@@ -1828,6 +1958,10 @@ coordinator_walk(OrcaParallel *op, Plan *plan, bool whole)
 					case GP_ORCA_VEC_HASHJOIN:
 					case GP_ORCA_VEC_RESULT:
 						break;
+					case GP_ORCA_VEC_APPEND:
+						foreach_ptr(Plan, child, ((CustomScan *) plan)->custom_plans)
+							coordinator_walk(op, child, whole);
+						break;
 					default:
 						return;
 				}
@@ -1897,6 +2031,9 @@ not_parallel(Plan *plan)
 		check_stack_depth();
 		plan->parallel_aware = false;
 		not_parallel(plan->righttree);
+		if (IsA(plan, CustomScan))
+			foreach_ptr(Plan, child, ((CustomScan *) plan)->custom_plans)
+				not_parallel(child);
 	}
 }
 
@@ -1927,6 +2064,15 @@ strip_gathers(Plan *plan)
 			((SubqueryScan *) plan)->subplan =
 				strip_gathers(((SubqueryScan *) plan)->subplan);
 			break;
+		case T_CustomScan:
+			{
+				ListCell   *lc;
+
+				/* a vector engine's append's branches past the first */
+				foreach(lc, ((CustomScan *) plan)->custom_plans)
+					lfirst(lc) = strip_gathers((Plan *) lfirst(lc));
+				break;
+			}
 		default:
 			break;
 	}

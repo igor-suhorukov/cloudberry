@@ -388,9 +388,27 @@ gather_read_whole(const char *query_string)
 }
 
 /*
+ * A split subtree run by one process: no node of its spines parallel-aware,
+ * a vector engine's append's branches past the first among them
+ * (orca/parallel.c, gp_orca_vec.h's GP_ORCA_VEC_APPEND).
+ */
+static void
+not_parallel(Plan *plan)
+{
+	for (; plan != NULL; plan = plan->lefttree)
+	{
+		check_stack_depth();
+		plan->parallel_aware = false;
+		if (IsA(plan, CustomScan))
+			foreach_ptr(Plan, child, ((CustomScan *) plan)->custom_plans)
+				not_parallel(child);
+	}
+}
+
+/*
  * A fragment's Gathers taken out: each replaced by what is below it, whose
  * columns a Gather passes on as they are (orca/parallel.c), run whole by its
- * one process -- the scan that drove it no longer parallel-aware, and an
+ * one process -- the scans that drove it no longer parallel-aware, and an
  * aggregate's middle stage combining the one state below it.
  */
 static Plan *
@@ -401,8 +419,7 @@ strip_gathers(Plan *plan)
 	check_stack_depth();
 	if (IsA(plan, Gather))
 	{
-		for (Plan *below = plan->lefttree; below != NULL; below = below->lefttree)
-			below->parallel_aware = false;
+		not_parallel(plan->lefttree);
 		return strip_gathers(plan->lefttree);
 	}
 	plan->lefttree = strip_gathers(plan->lefttree);
@@ -421,6 +438,14 @@ strip_gathers(Plan *plan)
 			((SubqueryScan *) plan)->subplan =
 				strip_gathers(((SubqueryScan *) plan)->subplan);
 			break;
+		case T_CustomScan:
+			{
+				ListCell   *lc;
+
+				foreach(lc, ((CustomScan *) plan)->custom_plans)
+					lfirst(lc) = strip_gathers((Plan *) lfirst(lc));
+				break;
+			}
 		default:
 			break;
 	}
