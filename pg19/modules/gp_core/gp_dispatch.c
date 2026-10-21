@@ -275,6 +275,14 @@ static const char *const synced_settings[] = {
 	"vexec.debug_check_plans",
 	"vexec.debug_layout_seed",
 	/*
+	 * ch_table_engines' (its ch_table_engines.md §2.14, CH6), which only a
+	 * superuser sets: the least level of ClickHouse's messages a segment's
+	 * engine passes to its log -- likewise.  Its other superuser settings
+	 * are read once, as a process first loads the engine library, and are
+	 * each node's own.
+	 */
+	"ch.engine_log_level",
+	/*
 	 * gp_ao's, which only a superuser sets too: what a segment's log says of
 	 * a VACUUM's compaction, a writer's segment file and the visibility map,
 	 * as Cloudberry syncs its Debug_appendonly_print_* -- likewise
@@ -593,6 +601,30 @@ static const char *const synced_settings[] = {
 	"vexec.gpu_transfer_cost",
 	"vexec.gpu_operator_factor",
 	/*
+	 * ch_table_engines' (its ch_table_engines.md §2.14, CH6), ClickHouse's
+	 * MergeTree family as table access methods, which a segment reads where
+	 * it writes and reads its share of a table and plans for itself: the
+	 * store a CREATE gives a table that names none -- each node makes its
+	 * share of the table with the store the coordinator's session says --
+	 * the write buffer's bounds, ChScan and its fetches by TID, their
+	 * prices, the parts' summaries and the sink's columns.  Passed over
+	 * where the extension is not loaded.  Not ch.max_merge_workers nor
+	 * ch.merge_naptime, each server's own merge workers', nor the engine
+	 * library's, which a process reads as it first loads it.
+	 */
+	"ch.default_storage",
+	"ch.insert_buffer_rows",
+	"ch.insert_buffer_bytes",
+	"ch.enable_chscan",
+	"ch.enable_fetch_columns",
+	"ch.enable_fetch_cache",
+	"ch.enable_sink_columns",
+	"ch.enable_memory_parts",
+	"ch.enable_part_summaries",
+	"ch.enable_summary_pruning",
+	"ch.fetch_cost",
+	"ch.fetch_value_cost",
+	/*
 	 * pg_otel_probe's trace context (its PLAN.md §4.7.2): the client's, which
 	 * a segment's statements join where nothing else says where they hang;
 	 * and the hidden ones the coordinator sets for each statement it traces
@@ -633,6 +665,7 @@ static const char *const superuser_settings[] = {
 	"vexec.debug_require_vector",
 	"vexec.debug_check_plans",
 	"vexec.debug_layout_seed",
+	"ch.engine_log_level",
 	"gp.debug_appendonly_print_compaction",
 	"gp.debug_appendonly_print_segfile_choice",
 	"gp.debug_appendonly_print_visimap",
