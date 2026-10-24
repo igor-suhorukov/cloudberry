@@ -269,11 +269,13 @@ static const char *const synced_settings[] = {
 	/*
 	 * vexec's debug settings, which only a superuser sets: a statement that
 	 * fails where no vector node was built, the plan check, and the layouts
-	 * drawn at random (pg_vector_executor.md §3.12) -- likewise
+	 * drawn at random (pg_vector_executor.md §3.12); and vexec_gpu's delay
+	 * of each of the executor's answers, its tests' -- likewise
 	 */
 	"vexec.debug_require_vector",
 	"vexec.debug_check_plans",
 	"vexec.debug_layout_seed",
+	"vexec_gpu.debug_delay_ms",
 	/*
 	 * ch_table_engines' (its ch_table_engines.md §2.14, CH6), which only a
 	 * superuser sets: the least level of ClickHouse's messages a segment's
@@ -558,11 +560,13 @@ static const char *const synced_settings[] = {
 	 * route's SQL, through PostgreSQL's planner and vexec's path hooks -- and
 	 * where its vector nodes begin: whether and how vector plans are made,
 	 * their prices, the in-memory format of batches, and whether a GPU is
-	 * used.  A fragment ORCA planned carries its decisions in its plan; these
-	 * are what a segment decides itself.  Passed over where vexec is not
-	 * loaded.  Not vexec.gpu_segments, the coordinator's alone, nor the
-	 * GPU's postmaster settings, each server's own.  Its debug settings, a
-	 * superuser's, are with the others above "role".
+	 * used and how -- each node kind's device strategy, a chunk's rows, the
+	 * kernels' precision (V8).  A fragment ORCA planned carries its
+	 * decisions in its plan; these are what a segment decides itself.
+	 * Passed over where vexec is not loaded.  Not vexec.gpu_segments, the
+	 * coordinator's alone, nor the GPU's postmaster settings, each server's
+	 * own.  Its debug settings, a superuser's, are with the others above
+	 * "role".
 	 */
 	"vexec.mode",
 	"vexec.cpu_tuple_factor",
@@ -600,6 +604,19 @@ static const char *const synced_settings[] = {
 	"vexec.gpu_setup_cost",
 	"vexec.gpu_transfer_cost",
 	"vexec.gpu_operator_factor",
+	"vexec.gpu_chunk_rows",
+	"vexec.enable_gpu_agg",
+	"vexec.enable_gpu_hashjoin",
+	"vexec.enable_gpu_sort",
+	"vexec.enable_gpu_scan",
+	"vexec.precision",
+	/*
+	 * vexec_gpu's, the GPU's provider to vexec (pg_vector_executor.md §3.11,
+	 * V8): how long a segment's device task waits for the executor's memory
+	 * before its node runs on the CPU.  Passed over where vexec_gpu is not
+	 * loaded.  Not its postmaster's and reload's settings, each server's own.
+	 */
+	"vexec_gpu.admission_wait",
 	/*
 	 * ch_table_engines' (its ch_table_engines.md §2.14, CH6), ClickHouse's
 	 * MergeTree family as table access methods, which a segment reads where
@@ -665,6 +682,7 @@ static const char *const superuser_settings[] = {
 	"vexec.debug_require_vector",
 	"vexec.debug_check_plans",
 	"vexec.debug_layout_seed",
+	"vexec_gpu.debug_delay_ms",
 	"ch.engine_log_level",
 	"gp.debug_appendonly_print_compaction",
 	"gp.debug_appendonly_print_segfile_choice",
